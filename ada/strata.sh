@@ -18,7 +18,7 @@ case "$1" in
     grep -A1 "^ready:" "$log" | tail -1 ;;
   stop)
     pkill -f '[s]erve/server.py --engine strata' && echo stopping
-    while pgrep -f '[b]uild/strata --serve' >/dev/null; do sleep 1; done; echo stopped ;;
+    while pgrep -f '[b]uild/strata[.a-z0-9-]* --serve' >/dev/null; do sleep 1; done; echo stopped ;;
   status) pgrep -af '[s]erve/server.py --engine strata' | cut -c1-160 || echo "not running" ;;
   log) tail -f strata-*.server.log ;;
   *) echo "usage: $0 start [config] | stop | status | log" ;;
