@@ -128,3 +128,27 @@ The lever is PBO (step by step: `PBO-GUIDE-2026-10-26.md`): PPT ~120 W, TDC 80 A
 
 `ada/bench/cpu/segv_bt.c`: an `LD_PRELOAD` SIGSEGV backtrace (it found the decode split's checkpoint-restore crash
 without gdb).
+
+## A 5900X / 5950X instead (estimate, not measured)
+
+The pool's compute today: 7 threads x ~4 GB/s = ~27 GB/s (power-bound, 76 W).  Its RAM ceiling: the fast places,
+~35 GB/s timed on 8 cores, maybe ~38-42 with more cores (DDR4-3200 dual channel: 51.2 in theory).  A 5900X (11 pool
+threads at ~4.2 GB/s, 142 W) is ~46 GB/s of compute, a 5950X ~60: both RAM-bound at ~35-40, so +30-45% pool
+throughput for either; the 5950X buys nothing over the 5900X here.  The 4th RAM stick does not raise that ceiling.
+
+| | 5700X + PBO | 5900X | 5950X |
+| --- | --- | --- | --- |
+| CPU pool | +10-12% | +30-45% (RAM-bound) | as the 5900X |
+| C=1 | ~+0.5-1% | ~+2-3% | ~+2-3% |
+| C=2 total | ~+5% | ~+12-20% | ~+12-20% |
+| C=3/4 total | ~+5-8% | ~+15-25% | ~+15-25% |
+| prefill | ~0 | ~0 | ~0 |
+
+C=1 gains little: on the split the CPU's work mostly runs beside the GPUs' and only ~0.66 ms of a 14.5 ms window
+waits for it (this replaces the earlier C=1 +8..+20%, from before the split).  At C>=2 the pool is busy 60-72% and
+the layers wait 55-93 us for it.  The two-chiplet parts add cross-CCD latency to the pool's per-layer syncs (a few
+us a layer, inside the ranges above).  With a 3rd card fewer experts are on the CPU and a CPU upgrade is worth
+less still.  Order: PBO first (free; it also shows how the pool scales with clock), a used 5900X if C>=2 matters
+before the 3rd card, not a 5950X.
+
+Status: PBO and the CPU swap are on hold (no physical access for now); the guide is `PBO-GUIDE-2026-10-26.md`.
