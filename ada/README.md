@@ -157,7 +157,8 @@ Upstream (niko1221) on this box loses at every concurrency: single stream ~45% s
 
 Done since the first version of this table: the decode layer split on 2 cards, up to 4 requests in flight with MTP
 each (paged K/V), the checkpoint-restore crash fix, the GPU kernel profile (`docs/KERNEL-PROFILE-2026-10-26.md`),
-`--spec 5` (no gain), the CPU pool found power-bound.  What is left, cheapest first within each group:
+`--spec 5` (no gain), the CPU pool found power-bound, SMT workers for the pool (no gain), the batch-slot
+admission copy fix (a second-GPU copy during another slot's graph capture took the engine down).  What is left, cheapest first within each group:
 
 **Settings / BIOS (no code)**
 
