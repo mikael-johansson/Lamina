@@ -175,8 +175,7 @@ Without `--batch` it only copied unused state.  The `pf-split-batch` prefill run
 
 ### `--spec 5` on the split (C=1, the corpus through the server, after the fix)
 
-Geometric mean over the 8 requests: spec 4 224.6 / 224.6 tok/s (two rounds), spec 5 225.7 / 225.6: +0.5%, noise.
+Geometric mean over the 8 requests, three interleaved rounds each (results `c4-r*`, `c5-r*`; an earlier set overlapped with a second session's runs on the same GPUs and port and was dropped): spec 4 225.3 / 225.0 / 224.5 tok/s, spec 5 225.7 / 225.2 / 224.8: +0.1%, noise.  No engine restarts in any of the six runs (the checkpoint fix).
 Per request -6% to +8%, partly because the outputs differ (a different window size verifies other drafts).  The
 direct code prompt (same tokens): spec 4 225.1 / 224.3, spec 5 219.5 / 220.4 (-2%); spec 5 accepts all 4 drafts in
-83 of 159 windows, but a 5-token window costs more.  Kept spec 4.  One more spec-4 round (not counted, its outputs
-also differ) came out at 202.6: one server start in a few decodes ~10% slower, worth watching.
+83 of 159 windows, but a 5-token window costs more.  Kept spec 4.
