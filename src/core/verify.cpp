@@ -6,6 +6,7 @@
 
 #include "strata/core/native_head.hpp"
 #include "strata/kernels/iq_kernels.hpp"
+#include "strata/kernels/cpu/pool.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/cpu/expert.hpp"
@@ -1252,6 +1253,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         const int grp = (int) (k % G);
         const uint32_t want = (uint32_t) (k + 1);
         const Clock::time_point a = Clock::now();
+        if (strata::kernels::cpu::tl::on()) {
+            strata::kernels::cpu::tl::next();
+            strata::kernels::cpu::tl::mark(strata::kernels::cpu::tl::kWaitStart);
+        }
         auto last_flush = a;
         uint32_t spins = 0;
         while (*seq < want) {
@@ -1275,6 +1280,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             }
         }
         const Clock::time_point b = Clock::now();
+        strata::kernels::cpu::tl::mark(strata::kernels::cpu::tl::kRang);
         VDBG("layer %lld rang\n", (long long) l);
         cur_layer_ = want - 1;
         set_plan_slot(grp);
@@ -1286,6 +1292,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, h_w_ + (size_t) tb * ss.k, n,
                  ss.k, h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
         VDBG("layer %lld served\n", (long long) l);
+        strata::kernels::cpu::tl::mark(strata::kernels::cpu::tl::kServed);
         std::atomic_thread_fence(std::memory_order_seq_cst);
         _mm_sfence();
         if (pcie_share_ && *(volatile uint32_t*) h_flagA_ != want) {   // no PCIe share published: an empty one
@@ -1303,6 +1310,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             *(volatile uint32_t*) sink_.gpu2_flag = want;
         }
         *flag = want;
+        strata::kernels::cpu::tl::mark(strata::kernels::cpu::tl::kFlag);
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
         ms_pool += ms_since(b);
         if (gpu2_ && *(volatile uint32_t*) sink_.gpu2_flag < want) {

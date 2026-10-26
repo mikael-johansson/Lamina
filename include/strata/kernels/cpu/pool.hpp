@@ -253,6 +253,16 @@ private:
     void native_quant_part(int e);
     void native_down_part(int e, int r0, int r1);
 };
+/// STRATA_POOL_TIMELINE=<file> (diagnostics): host timestamps of every verify layer, written as CSV at exit.
+namespace tl {
+enum Mark { kWaitStart, kRang, kPlanned, kGuStart, kGuEnd, kQEnd, kDownEnd, kServed, kFlag, kMarks };
+bool on();
+void next();                              // a new record: one per layer the host serves
+void mark(Mark m);
+void join(int phase, int slot);           // a thread entered the phase (0 gate/up, 1 down); slot 0 = host
+void leave(int phase, int slot);          // ... and claimed nothing more
+}  // namespace tl
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif

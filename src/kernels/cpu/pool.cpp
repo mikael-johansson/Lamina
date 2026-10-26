@@ -8,6 +8,8 @@
 #include <immintrin.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -331,10 +333,14 @@ void ExpertPool::close_phase() {
 }
 
 void ExpertPool::drain(int id, ExpertScratch& scratch) {
-    (void) id;
+    const bool tl_ph = tl::on() && (mode_ == 5 || mode_ == 6);
+    if (tl_ph) tl::join(mode_ - 5, id + 1);
     for (;;) {
         const uint32_t i = head_.fetch_add(1, std::memory_order_relaxed);
-        if (i >= (uint32_t) njobs_) break;
+        if (i >= (uint32_t) njobs_) {
+            if (tl_ph) tl::leave(mode_ - 5, id + 1);
+            break;
+        }
         if (mode_ == 0) {
             const ExpertJob& j = jobs_[i];
             s2_expert_vnni_q(j.blob, *j.act, j.out, scratch);
@@ -482,16 +488,20 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         mtasks_ = 3 * threads;
         mrows_ = (int64_t) nb * FF;
         const auto a = std::chrono::steady_clock::now();
+        if (b0 == 0) tl::mark(tl::kGuStart);
         run_phase(5, mtasks_, b0 == 0 ? first : nullptr, ctx);
         const auto b = std::chrono::steady_clock::now();
+        tl::mark(tl::kGuEnd);
         for (int e = 0; e < nb; ++e)
             for (int t = 0; t < mjobs_[e].nt; ++t)
                 if (f.d_type == 42) act_quant_any(split_multi_[(size_t) e].ff[t], FF, split_multi_[(size_t) e].a2[t]);
                 else native_quant_h(f, split_multi_[(size_t) e].ff[t], split_multi_[(size_t) e].hq[t]);
         const auto c = std::chrono::steady_clock::now();
+        tl::mark(tl::kQEnd);
         mrows_ = (int64_t) nb * H;
         run_phase(6, mtasks_);
         const auto d = std::chrono::steady_clock::now();
+        tl::mark(tl::kDownEnd);
         ms_multi_gu += std::chrono::duration<double, std::milli>(b - a).count();
         ms_multi_q += std::chrono::duration<double, std::milli>(c - b).count();
         ms_multi_down += std::chrono::duration<double, std::milli>(d - c).count();
@@ -618,5 +628,48 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
     ms_drain_ += std::chrono::duration<double, std::milli>(t_c - t_b).count();
     ms_close_ += std::chrono::duration<double, std::milli>(t_d - t_c).count();
 }
+
+namespace tl {
+namespace {
+struct Rec {
+    int64_t t[kMarks];
+    int64_t in[2][17], out[2][17];
+};
+std::vector<Rec> g_recs;
+const char* g_path = std::getenv("STRATA_POOL_TIMELINE");
+int64_t ns_now() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+void dump() {
+    FILE* f = std::fopen(g_path, "w");
+    if (f == nullptr) return;
+    std::fprintf(f, "i,wait,rang,planned,gu0,gu1,q1,down1,served,flag");
+    for (int p = 0; p < 2; ++p)
+        for (int s = 0; s < 17; ++s) std::fprintf(f, ",in%d_%d,out%d_%d", p, s, p, s);
+    std::fprintf(f, "\n");
+    for (size_t i = 0; i < g_recs.size(); ++i) {
+        const Rec& r = g_recs[i];
+        const int64_t z = r.t[kWaitStart];
+        std::fprintf(f, "%zu", i);
+        for (int m = 0; m < kMarks; ++m) std::fprintf(f, ",%lld", r.t[m] ? (long long) (r.t[m] - z) : -1LL);
+        for (int p = 0; p < 2; ++p)
+            for (int s = 0; s < 17; ++s)
+                std::fprintf(f, ",%lld,%lld", r.in[p][s] ? (long long) (r.in[p][s] - z) : -1LL,
+                             r.out[p][s] ? (long long) (r.out[p][s] - z) : -1LL);
+        std::fprintf(f, "\n");
+    }
+    std::fclose(f);
+}
+}  // namespace
+bool on() { return g_path != nullptr; }
+void next() {
+    if (g_recs.empty()) { g_recs.reserve(1 << 16); std::atexit(dump); }
+    if (g_recs.size() < g_recs.capacity()) g_recs.push_back(Rec{});
+}
+void mark(Mark m) { if (!g_recs.empty()) g_recs.back().t[m] = ns_now(); }
+void join(int phase, int slot) { if (!g_recs.empty()) g_recs.back().in[phase][slot] = ns_now(); }
+void leave(int phase, int slot) { if (!g_recs.empty()) g_recs.back().out[phase][slot] = ns_now(); }
+}  // namespace tl
 
 }  // namespace strata::kernels::cpu

@@ -519,6 +519,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     };
     if (n2g <= 0) submit2 = nullptr;
     pt("run", njobs);
+    strata::kernels::cpu::tl::mark(strata::kernels::cpu::tl::kPlanned);
     // STRATA_POOL_FUSED=1 (opt-in): the layer's gate/up and down rows as one batch, no barrier between them
     static const bool pool_fused = [] { const char* v = std::getenv("STRATA_POOL_FUSED"); return v != nullptr && std::atoi(v) != 0; }();
     if (native && pool_fused) {
