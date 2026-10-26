@@ -110,9 +110,10 @@ One verify window (~4 tokens checked at once, short context) is ~15.7 ms
   - Not RAM-bound overall: with every CPU expert in dual-channel RAM (below) the window time did not change.
   - Thread count (direct mode): 4 threads 8.0 ms pool / 176 tok/s, 5 7.3 / 186, 7 6.4 / 191-196.
   - Kernel switches `STRATA_IQ_MT_MIN=1`, `STRATA_IQ256_GATHER=1`: within noise on the 5700X.
-  - So: more cores help gate/up (a 5900X/5950X: rough C=1 +8..+20%, less the two-chiplet sync cost); a CPU
-    overclock little (the cores already run ~4.5 of 4.65 GHz under this load: +1.5-3% with PBO/Curve
-    Optimizer); faster AVX2 IQ kernels or fewer misses (a 3rd GPU) more.
+  - So (revised later on 2026-10-26, measured with RAPL): under the pool's load on all cores the 5700X sits at its
+    76 W PPT and ~4.0 GHz (one core 4.65), so PBO is worth ~+10-12% pool throughput; a 5900X ~+30-45% (then
+    RAM-bound, a 5950X no more); on the split that is C=1 only ~+1-3%, C>=2 more.  Faster AVX2 IQ kernels buy
+    little while power-bound; fewer misses (a 3rd GPU) the most.  See `docs/KERNEL-PROFILE-2026-10-26.md`.
 - RAM layout (measured with `bench/membw`, root, by physical address): with 3 sticks, physical 0-32 GiB is
   single-channel (~22 GB/s on 8 cores) and 32-96 GiB dual-channel (~36 GB/s). `--arena-place` is meant to put
   the CPU's experts in the fast places, but it timed them on one core (the pool's host thread was already
