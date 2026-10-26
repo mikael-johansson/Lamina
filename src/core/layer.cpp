@@ -507,6 +507,7 @@ struct ElasticPool {
     // rows: the row after the last block)
     std::vector<uint64_t> off, per_page, extra;
     int64_t n_pages = 0, page_size = 0;
+    bool frozen = false;   // qsa_kv_elastic_freeze
     /// Writes array a's bytes [lo, hi) to `dst` as they are mapped; none: they are zeroed.
     std::function<bool(size_t a, uint64_t lo, uint64_t hi, uint8_t* dst)> fill;
     /// Appends an array (after n_pages is set).
@@ -587,15 +588,20 @@ void qsa_set_kv_elastic(bool enabled, int64_t init_cells) {
     if (init_cells > 0) g_kv_elastic_init = init_cells;
 }
 bool qsa_kv_elastic() { return g_kv_elastic; }
+void qsa_kv_elastic_freeze(const QsaState& st) {
+    if (st.kv_elastic >= 0 && (size_t) st.kv_elastic < g_pools.size()) g_pools[(size_t) st.kv_elastic]->frozen = true;
+}
 int64_t qsa_kv_elastic_cells() {
     int64_t cells = std::numeric_limits<int64_t>::max();
-    for (const auto& p : g_pools) cells = std::min<int64_t>(cells, pool_pages_mapped(*p) * p->page_size);
+    for (const auto& p : g_pools)
+        if (!p->frozen) cells = std::min<int64_t>(cells, pool_pages_mapped(*p) * p->page_size);
     return cells;
 }
 int64_t qsa_kv_elastic_need(int64_t cells) {
     const uint64_t G = vmm_granularity();
     int64_t n = 0;
     for (const auto& p : g_pools) {
+        if (p->frozen) continue;
         const int64_t pages = pool_pages(*p, cells);
         for (size_t a = 0; a < p->off.size(); ++a) {
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, pages);
@@ -606,13 +612,14 @@ int64_t qsa_kv_elastic_need(int64_t cells) {
 }
 bool qsa_kv_elastic_grow(int64_t cells, const std::function<VmmChunk()>& take) {
     for (auto& p : g_pools)
-        if (!pool_grow(*p, cells, take)) return false;
+        if (!p->frozen && !pool_grow(*p, cells, take)) return false;
     return cudaDeviceSynchronize() == cudaSuccess;
 }
 int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>& give) {
     const uint64_t G = vmm_granularity();
     int64_t n = 0;
     for (auto& p : g_pools) {
+        if (p->frozen) continue;
         const int64_t pages = pool_pages(*p, cells);
         for (size_t a = 0; a < p->off.size(); ++a) {
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, pages);

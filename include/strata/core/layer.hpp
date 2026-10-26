@@ -305,6 +305,9 @@ uint64_t qsa_kv_cell_bytes(const ModelGeometry& g, KvFormat kv);
 /// move, so the captured graphs stay valid.  Set before sizing and initializing the session and the drafter.
 void qsa_set_kv_elastic(bool enabled, int64_t init_cells);
 bool qsa_kv_elastic();
+/// --decode-split: the state's pools stay as they are mapped (its layers run in another GPU's session), out of the
+/// growth below and of the cells it reports.
+void qsa_kv_elastic_freeze(const QsaState& st);
 /// Cells every elastic state can hold now (INT64_MAX when none is elastic).
 int64_t qsa_kv_elastic_cells();
 /// Chunks still to map for every elastic state to hold `cells` cells.

@@ -98,7 +98,13 @@ int64_t even_chunk(int64_t len, int64_t cap) {
 // nearly every expert of every layer, and under --prompt-split runs its second stage alone after the first's); whole
 // chunks on one GPU, whose copy-ahead area grows with a chunk's tokens (UD-Q4_K_XL's 64K prompt on the 3090 alone
 // 45.6 s in whole chunks, 52.4 in chunks of one size)
+// --decode-split: a prompt of one chunk in this many pieces, so its two stages overlap (one piece: the second stage
+// waits for the first; STRATA_DSPLIT_PIECES, default 1: more pieces measured slower, each streams the experts its
+// tokens use again)
+int g_split_pieces = 0;
 int64_t prompt_chunk(int64_t len, int64_t cap, bool second_gpu) {
+    if (g_split_pieces > 1 && len <= cap && len >= 2 * 1024)
+        return even_chunk(len, std::max<int64_t>(1024, (len + g_split_pieces - 1) / g_split_pieces));
     return second_gpu ? even_chunk(len, cap) : std::min(len, cap);
 }
 
@@ -1485,6 +1491,8 @@ int main(int argc, char** argv) {
         o.adapt_every = 0;
         o.second_gpu_prefetch_mb = 0.0;
         o.prompt_split = o.decode_split;   // every prompt in the same two stages, on the decode split's own state
+        const char* pieces = std::getenv("STRATA_DSPLIT_PIECES");
+        g_split_pieces = pieces != nullptr ? std::atoi(pieces) : 1;
     }
     // before anything builds an expert layout or runs an expert: the GPU's kernels and the CPU pool's SwiGLU
     strata::kernels::set_expert_math(o.expert_math == "exact" ? strata::kernels::ExpertMath::Exact
@@ -2311,6 +2319,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: --decode-split: layers %lld.. and the head on GPU %d (%.0f MiB); %.0f MiB of "
                              "their weights freed here\n", (long long) o.decode_split, dsplit.device(),
                      (double) dsplit.bytes() / 1048576.0, (double) freed / 1048576.0);
+        // the main session's K/V of those layers is never read again: it stops growing with the context
+        for (int64_t l = 0, qi = 0; l < g.n_layers; ++l)
+            if (strata::core::is_qsa_layer(g, l)) {
+                if (l >= (int64_t) o.decode_split) strata::core::qsa_kv_elastic_freeze(ss.qsa_states[qi]);
+                ++qi;
+            }
     }
     strata::core::ExpertCache xcache;
     std::vector<std::pair<int32_t, int32_t>> profile;
