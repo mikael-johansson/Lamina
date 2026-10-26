@@ -96,16 +96,19 @@ One verify window (~4 tokens checked at once, short context) is ~15.7 ms
 | waiting for the second card | 0.3 (3.9 with prefetch on) |
 | other | ~1 |
 
-- The CPU's misses: ~1.6 missed experts per layer at 98-99% hit, computed by 6 pool workers, limited by RAM
-  reads (not the cores, not PCIe). At 94-95% hit (agent traffic) there are ~3x as many, so this share grows.
+- The CPU's misses: ~1.6 missed experts per layer at 98-99% hit, computed by 6 pool workers at ~25 GB/s. That
+  rate is the pool's own limit, not the RAM's: per layer it reads only ~3 MB in two phases with a barrier each
+  (~130 us), too little work to reach the RAM's speed. Evidence: with every CPU expert moved into dual-channel
+  RAM (below) the pool's rate and the window time did not change (direct mode, ABAB: 24.5-25.2 GB/s, 15.5-15.6 ms
+  per window either way), and pool workers 5/7 were within noise. At 94-95% hit (agent traffic) there are ~3x as
+  many misses, so this share grows.
 - RAM layout (measured with `bench/membw`, root, by physical address): with 3 sticks, physical 0-32 GiB is
   single-channel (~22 GB/s on 8 cores) and 32-96 GiB dual-channel (~36 GB/s). `--arena-place` is meant to put
   the CPU's experts in the fast places, but it timed them on one core (the pool's host thread was already
-  pinned), where both regions read ~25 GB/s, so it could not tell them apart. Fixed on this branch (it times on
-  all cores, `src/core/arena_place.cpp`): it now finds ~10K slow places (~20 GiB) and moves the ~2,900 CPU experts
-  that were in them (42%) out. Decode +3% on average (ABAB runs `bench/results/ram-*`, 13 of 16 requests faster;
-  150K context +7-8%). With the CPU's experts already in dual-channel RAM, a 4th stick adds capacity more than
-  decode speed for IQ3_S.
+  pinned), where both regions read ~25 GB/s. Fixed on this branch (it times on all cores,
+  `src/core/arena_place.cpp`): it now finds ~10K slow places (~20 GiB) and moves the ~2,900 CPU experts that were
+  in them (42%) out. Measured effect on decode: none in direct mode; +3% in server ABAB runs
+  (`bench/results/ram-*`), likely noise. A 4th stick is therefore unlikely to speed up IQ3_S decode; it adds room.
 - The main card's own work (~11 ms) is neither compute- nor clearly bandwidth-bound. Estimate from the weight
   sizes: each window reads ~2.9 GB of dense weights (projections 2.0 GB, hyper-connections 0.64 GB, its part of
   the head ~0.3 GB) plus ~1.5-2 GB of resident experts, i.e. ~400-450 GB/s, about half of the 3090's 936 GB/s.
@@ -127,7 +130,7 @@ prefill needs faster kernels or a third card.
 
 ## What was tried
 
-Kept: prefetch 0, split 28 (IQ3_S), VRAM reserve 512 MiB, CPU vision, `--arena-place` timed on all cores.
+Kept: prefetch 0, split 28 (IQ3_S), VRAM reserve 512 MiB, CPU vision, `--arena-place` timed on all cores (correct, but no measurable speedup).
 
 Not kept (repeated A/B, within noise or worse): `--spec 5`, `--spec-min-p 0.4`, fused pool phases
 (`STRATA_POOL_FUSED=1`, +1.6%), pool workers 5/7, adaptive decay 0.5/0.9, 192 swaps, a static second tier,
@@ -142,7 +145,7 @@ Upstream (niko1221) on this box loses at every concurrency: single stream ~45% s
 
 | idea | expected | cost |
 | --- | --- | --- |
-| 4th RAM stick | 32 GB more room (Q4, more at once); little decode gain for IQ3_S since the arena fix | hardware |
+| 4th RAM stick | 32 GB more room (Q4, more at once); no decode gain expected for IQ3_S (the pool is not RAM-bound) | hardware |
 | batching in the fork (C>=2) | C=2 ~1.35x total short / ~1.2x at 40K; C=4 ~1.65x / ~1.35x | several days of engine work |
 | TP=2 | C=1 +25-35% (estimate; P2P works, 11-21 us one-way pushes) | weeks |
 | 3rd card for Q4 | Q4 is CPU-miss-bound on 2 cards | hardware |
