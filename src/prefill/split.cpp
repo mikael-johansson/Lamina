@@ -97,6 +97,7 @@ struct PromptSplit::Impl {
     // the second stage's session state, indexed from `at`: its QSA layers' copies, its GDN layers' (the main session's
     // GDN states [gdn_first, gdn_first + gdn_count)), and the draft layer's cells of one chunk at a time
     core::SessionState ss2;
+    bool resident = false;   // set_resident: wt2 and ss2 are the decode split's, on that GPU for good
     std::vector<core::QsaState> qsa2;
     std::vector<int64_t> qsa_main;   // their index among the main session's QSA states
     int64_t gdn_first = 0, gdn_count = 0;
@@ -234,8 +235,10 @@ struct PromptSplit::Impl {
         // host copy of them was no faster: 0.5% of a 32K-token prompt)
         std::vector<Run> runs;
         for (const WSrc& w : wsrc) runs.push_back({(const uint8_t*) w.dev, w_base + w.off, w.bytes});
-        state_runs(false, runs);
-        qsa_runs(0, pos0, false, runs);
+        if (!resident) {   // resident: the state of the layers here is already here
+            state_runs(false, runs);
+            qsa_runs(0, pos0, false, runs);
+        }
         if (!stage_copy(runs, true, e)) return false;
         cudaStreamWaitEvent(s2, ev_a, 0);   // the stage's work after its state and weights
         cudaEvent_t w_done = nullptr;
@@ -283,9 +286,9 @@ struct PromptSplit::Impl {
         dkv2.first_cell = first_cell;
         p2.set_in_events(ev_in.data(), n);
         if (!p2.run(j.tokens, j.T, j.p0, e)) return false;
-        // the chunk's cells to the main GPU's session
+        // the chunk's cells to the main GPU's session (resident: they stay here; the draft layer's go)
         std::vector<Run> runs;
-        qsa_runs(j.p0, j.p0 + j.T, true, runs);
+        if (!resident) qsa_runs(j.p0, j.p0 + j.T, true, runs);
         if (mtp != nullptr) {
             const core::QsaState& dm = mtp->kv_state();
             const auto a2 = core::qsa_kv_arrays(draft2, *g), am = core::qsa_kv_arrays(dm, *g);
@@ -393,9 +396,10 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
     m.main = main_device;
     m.max_chunk = max_chunk;
     m.s = core::qsa_shapes(g);
-    // ---- the tensors of the layers from `at` on, and the draft layer's prompt-K/V weights
+    // ---- the tensors of the layers from `at` on (resident: none, the decode split's are used), and the draft layer's
+    // prompt-K/V weights
     for (const auto& [name, ref] : wt.all()) {
-        if (name.rfind("blk.", 0) != 0) continue;
+        if (m.resident || name.rfind("blk.", 0) != 0) continue;
         const int64_t l = std::atoll(name.c_str() + 4);
         if (l < at || l >= g.n_layers) continue;
         Tensor t;
@@ -478,12 +482,15 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
         return false;
     }
 
-    // its session state: the QSA states sized as the main session's until `begin` makes the copies
-    m.qsa2.assign(m.qsa_main.size(), core::QsaState{});
-    for (core::QsaState& q : m.qsa2) q.max_cells = ss.qsa_states[0].max_cells;
-    m.ss2.qsa_states = m.qsa2.data();
-    m.ss2.k = ss.k;
-    m.ss2.max_cells = ss.max_cells;
+    // its session state: the QSA states sized as the main session's until `begin` makes the copies (resident: the
+    // decode split's, set already)
+    if (!m.resident) {
+        m.qsa2.assign(m.qsa_main.size(), core::QsaState{});
+        for (core::QsaState& q : m.qsa2) q.max_cells = ss.qsa_states[0].max_cells;
+        m.ss2.qsa_states = m.qsa2.data();
+        m.ss2.k = ss.k;
+        m.ss2.max_cells = ss.max_cells;
+    }
     m.p2.set_layers(at, -1, nullptr);
     m.p2.set_fast_link(true);
     // its GPU's queue of this stage's work short: the first stage's shares queued after it wait for all of it (1, 2 and
@@ -507,6 +514,12 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
 }
 
 int64_t PromptSplit::at() const { return impl_->at; }
+void PromptSplit::set_resident(const core::WeightTable& wt2, const core::SessionState& ss2) {
+    Impl& m = *impl_;
+    m.resident = true;
+    m.wt2 = wt2;
+    m.ss2 = ss2;
+}
 void PromptSplit::set_order(std::vector<int32_t> order) { impl_->p2.set_order(std::move(order)); }
 bool PromptSplit::active() const { return impl_->on; }
 const PrefillStats& PromptSplit::stats() const { return impl_->p2.stats(); }
@@ -515,8 +528,10 @@ void PromptSplit::set_profile(bool on) { impl_->p2.profile = on; }
 uint64_t PromptSplit::bytes_for(int64_t chunk, int64_t cells) const {
     const Impl& m = *impl_;
     uint64_t n = up(m.p2.bytes_for(chunk)) + up(m.wbytes);
-    n += (uint64_t) m.qsa2.size() * up(core::qsa_state_prompt_bytes(*m.g, cells, 0, true, core::qsa_kv_format()));
-    n += up((uint64_t) m.gdn_count * core::gdn_state_floats(*m.g) * 4);
+    if (!m.resident) {
+        n += (uint64_t) m.qsa2.size() * up(core::qsa_state_prompt_bytes(*m.g, cells, 0, true, core::qsa_kv_format()));
+        n += up((uint64_t) m.gdn_count * core::gdn_state_floats(*m.g) * 4);
+    }
     if (m.mtp != nullptr) n += up(m.draft_bytes(chunk, cells));
     return n;
 }
@@ -541,7 +556,7 @@ bool PromptSplit::begin(void* region, uint64_t bytes, int64_t chunk, int64_t pos
     p += pb;
     m.w_base = p;
     p += up(m.wbytes);
-    // the weights' rows on the second GPU
+    // the weights' rows on the second GPU (resident: none here)
     for (const Tensor& t : m.tensors) {
         core::WeightRef r = t.ref;
         r.data = t.bytes[0] ? m.w_base + t.off[0] : nullptr;
@@ -565,14 +580,17 @@ bool PromptSplit::begin(void* region, uint64_t bytes, int64_t chunk, int64_t pos
         m.dkv2.k_norm = (const float*) (w + m.dkv_off[9]);
         m.first_cell = m.mtp->prompt_kv().first_cell;
     }
-    // its session state's copies, zeroed (the prefix's cells and the state at pos0 come in on its thread)
+    // its session state's copies, zeroed (the prefix's cells and the state at pos0 come in on its thread; resident:
+    // the decode split's state is the stage's own)
     for (core::QsaState& q : m.qsa2) {
         const uint64_t n = core::qsa_state_prompt_init(*m.g, cells, 0, true, core::qsa_kv_format(), p, q, m.cp2);
         if (n == 0) { cudaSetDevice(cur); err = "prompt split: the K/V copies"; return false; }
         p += up(n);
     }
-    m.ss2.gdn_state = (float*) p;
-    p += up((uint64_t) m.gdn_count * core::gdn_state_floats(*m.g) * 4);
+    if (!m.resident) {
+        m.ss2.gdn_state = (float*) p;
+        p += up((uint64_t) m.gdn_count * core::gdn_state_floats(*m.g) * 4);
+    }
     m.draft_base = p;
     cudaSetDevice(cur);
     m.pos0 = pos0;
@@ -671,8 +689,8 @@ bool PromptSplit::finish(std::string& err) {
     m.p1->set_layers(0, -1, nullptr);
     bool ok = !m.failed;
     if (!ok) err = "prompt split: " + m.err;
-    // the GDN states and the indexers' fixed-size state go back (the cells went after each chunk)
-    if (ok) {
+    // the GDN states and the indexers' fixed-size state go back (the cells went after each chunk; resident: they stay)
+    if (ok && !m.resident) {
         std::vector<Run> runs;
         m.state_runs(true, runs);
         ok = m.stage_copy(runs, false, err);

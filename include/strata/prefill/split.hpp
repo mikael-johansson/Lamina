@@ -52,6 +52,10 @@ public:
               core::MtpDrafter* mtp, int64_t at, int device, int main_device, core::ExpertSource* src,
               const core::ExpertCache* cache, const int32_t* res, int64_t max_chunk, std::string& err);
     int64_t at() const;
+    /// --decode-split (core/decode_split.hpp): the second stage's layers already live on its GPU - their dense weights
+    /// `wt2` and their session `ss2`, indexed from `at` - so a prompt copies neither in nor its state back, and the
+    /// main GPU's session keeps only the layers before `at`.  Before `init`.
+    void set_resident(const core::WeightTable& wt2, const core::SessionState& ss2);
     /// Prefill::set_order for the second stage's copies ahead.
     void set_order(std::vector<int32_t> order);
 

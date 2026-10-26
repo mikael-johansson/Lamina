@@ -1423,6 +1423,7 @@ int main(int argc, char** argv) {
         o.head_split = 0.0;
         o.adapt_every = 0;
         o.second_gpu_prefetch_mb = 0.0;
+        o.prompt_split = o.decode_split;   // every prompt in the same two stages, on the decode split's own state
     }
     // before anything builds an expert layout or runs an expert: the GPU's kernels and the CPU pool's SwiGLU
     strata::kernels::set_expert_math(o.expert_math == "exact" ? strata::kernels::ExpertMath::Exact
@@ -3446,6 +3447,7 @@ int main(int argc, char** argv) {
                 }
                 cudaSetDevice(o.main_gpu);
             }
+            if (o.decode_split > 0) split.set_resident(dsplit.weights(), dsplit.session());
             if (se.empty() && split.init(prefill, wt, g, ss, o.mtp.empty() ? nullptr : &mtp, (int64_t) o.prompt_split,
                                          o.second_gpu, o.main_gpu, srcp, &gpu2.cache(),
                                          host_res2.empty() ? nullptr : host_res2.data(), o.prefill_chunk, se)) {
@@ -3456,7 +3458,12 @@ int main(int argc, char** argv) {
                              std::chrono::duration<double, std::milli>(Clock::now() - ts).count());
             } else {
                 std::fprintf(stderr, "strata generate: --prompt-split off: %s\n", se.c_str());
+                if (o.decode_split > 0) return 1;   // the layers from the split on hold their state on the second GPU
             }
+        } else if (o.decode_split > 0) {
+            std::fprintf(stderr, "strata generate: --decode-split needs the prompt path on the second GPU (no "
+                                 "--no-prompt-offload)\n");
+            return 2;
         }
         pbuf.g = &g;
         pbuf.ss = &ss;
@@ -4418,7 +4425,8 @@ int main(int argc, char** argv) {
                 // The checkpoints every --cache-every cells fall at the chunks' ends.
                 const int64_t chunk = prompt_chunk(batched_end - reuse, o.prefill_chunk, pbuf.offload != nullptr);
                 const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * chunk;
-                const bool split_try = pbuf.split != nullptr && batched_end - reuse > o.prefill_chunk;
+                // (--decode-split: every prompt, the layers from the split on hold their state on the second GPU)
+                const bool split_try = pbuf.split != nullptr && (batched_end - reuse > o.prefill_chunk || o.decode_split > 0);
                 if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
                 const bool split_on = pbuf.split_region != nullptr;
                 if (split_on) {
@@ -4775,7 +4783,8 @@ int main(int argc, char** argv) {
         const bool path_ok = setup_prompt_path(prefill, offload, pbuf, psplit, err);
         const int64_t chunk = path_ok ? prompt_chunk(n_batched, o.prefill_chunk, pbuf.offload != nullptr) : 0;
         if (!path_ok ||
-            !pbuf.take(chunk, err, pbuf.split != nullptr && n_batched > o.prefill_chunk ? psplit.bytes_for(chunk, n_batched) : 0)) {
+            !pbuf.take(chunk, err, pbuf.split != nullptr && (n_batched > o.prefill_chunk || o.decode_split > 0)
+                                       ? psplit.bytes_for(chunk, n_batched) : 0)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
@@ -5150,8 +5159,8 @@ int main(int argc, char** argv) {
             ver2->set_host_rows(true);
             ver2->set_profile(o.window_profile);
             ver2->set_pcie_share(false);
-            const bool ok2 = ver2->init(dsplit.weights(), g, dsplit.session(), vh2, &dsplit.head(), o.max_window(), err) &&
-                             dsplit.copy_in(spec_pos, err);
+            // (the prompt ran its layers from the split on in the second GPU's session already: set_resident)
+            const bool ok2 = ver2->init(dsplit.weights(), g, dsplit.session(), vh2, &dsplit.head(), o.max_window(), err);
             cudaSetDevice(o.main_gpu);
             if (!ok2) {
                 std::fprintf(stderr, "strata generate: --decode-split: %s\n", err.c_str());
