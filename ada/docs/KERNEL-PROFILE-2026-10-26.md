@@ -66,8 +66,37 @@ with FP32 accumulate 11%, QSA attention (FP16 mma, FP32 accumulate) 10%, QSA ind
 the kernel time is on the FP16/BF16-into-FP32 tensor-core path that gpu-unlock doubles: expected +8-15% on long
 prompts, nothing on decode.
 
+## Kernel fusion: the HC read in one kernel (tried, not kept)
+
+`bench/kernels/hc-fused-experiment.patch` (`STRATA_HC_FUSED=1`, windows of 1-4 tokens): one kernel of 80 blocks,
+one an SM.  Each block starts `cp.async` copies of its up rows' codes and scales (43.5 KB) and of the epilogue's
+inputs into shared memory, does the down slice as `gr_down_q8_split`, then crosses a grid-wide barrier (atomic
+counter and generation; traps after ~1 s instead of hanging).  The (token, row) sums are shared out between the
+blocks, then a second barrier, then each block does two old up blocks' work from shared memory.  Bitwise equal to
+the two kernels at T = 1..4 (`gk T 1 <dump>` with and without the variable).  Deadlock-safe in the engine's graph:
+80 blocks of 82 SMs at one an SM, and the only kernels that spin forever are a few threads.
+
+It is slower: T=4 25.4 us against 20.6 (T=1 19.6 against 16.2).  By phase (T=4):
+
+| phase | ends at | |
+| --- | --- | --- |
+| down slice + every prefetch | 12.95 us | the two-kernel down: 11.4 (8.9 without its reduction) |
+| barrier 1 | 14.4 | +1.4 |
+| shared-out sums + barrier 2 | 17.7 | +3.3 (each block adding all 26K partials itself: +7.1) |
+| lo back | 18.9 | +1.2 |
+| up from shared memory | 25.4 | +6.6: 8 warps an SM instead of the up kernel's 16, issue-bound |
+
+The overlap of the reads gains ~4 us; the two barriers and the cross-block sums cost ~5, and the up arithmetic at
+half the occupancy ~3 more.  Two blocks an SM (160 blocks, finer slices) would restore the occupancy but change the
+summation order (no longer bitwise) and, by the phases above, reach ~19 us at best against 20.6: not worth it.
+
+The router is ~12.5 us alone and ~19 in the engine: the rest is publishing each layer's activations to mapped host
+memory for the CPU pool and the system-scope fence before the ring.  The fork already sends one form per layer
+(floats or Q8_K, the q8_1 rows only with a second-GPU tier).
+
 ## What is left
 
-Fusing the chains of small dependent kernels (HC down + up, the router) so their reads overlap: up to ~12% of a
-window.  On Ampere (no programmatic dependent launch) that needs a grid-wide wait inside the graph, beside kernels
-that spin on CPU flags: co-residency has to be guaranteed or it can deadlock.  It carries over to a 3-stage split.
+On this card the small kernels' cost is mostly their own arithmetic and reductions at low occupancy, not the
+gaps between them: fusing the HC read did not pay (above).  Without programmatic dependent launch (Hopper on) there
+is no cheap way to start a kernel's reads before its predecessor ends.  The cheap remaining levers are settings:
+VRAM overclock (the big streams are at the bandwidth limit), gpu-unlock for prefill, CPU PBO, `--spec 5`.

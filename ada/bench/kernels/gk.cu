@@ -138,6 +138,21 @@ int main(int argc, char** argv) {
         CK(cudaGraphExecDestroy(x));
         CK(cudaGraphDestroy(g));
     };
+    if (argc > 3) {   // one read of layer 0 from these inputs, every output to argv[3] (compare two builds' bitwise)
+        hc_read(ly[0], s);
+        hc_read(ly[1], s);   // a second, reading R as the first left it
+        CK(cudaStreamSynchronize(s));
+        FILE* f = std::fopen(argv[3], "wb");
+        auto dump = [&](const float* d, size_t n) {
+            std::vector<float> h(n);
+            CK(cudaMemcpy(h.data(), d, n * 4, cudaMemcpyDeviceToHost));
+            std::fwrite(h.data(), 4, n, f);
+        };
+        dump(R, (size_t) T * D); dump(mixed, (size_t) T * N); dump(lo, (size_t) T * LR); dump(rs, (size_t) T * HC);
+        dump(inj_out, (size_t) T * HC);
+        std::fclose(f);
+        return 0;
+    }
     std::printf("T = %d, %d reps of 48 layers\n", T, reps);
     time("HC read (down + up)", hc_read);
     time("router", router);

@@ -1,0 +1,364 @@
+diff --git a/src/kernels/cuda/fused_gr.cu b/src/kernels/cuda/fused_gr.cu
+index db8cff75..af3bb555 100644
+--- a/src/kernels/cuda/fused_gr.cu
++++ b/src/kernels/cuda/fused_gr.cu
+@@ -563,6 +563,329 @@ __global__ void __launch_bounds__(THREADS) gr_up_q8_multi_kernel(GrMulti m) {
+     }
+ }
+ 
++
++// The 8-bit read in one kernel (STRATA_HC_FUSED=1, up to DT tokens).  Block (s, g) does gr_down_q8_split's work for
++// its slice and group; then, past a grid-wide barrier, gr_up_q8_multi's for the up blocks g DS + s and that + FB.
++// Their codes and scales are copied into shared memory (cp.async) at the kernel's start, so those DRAM reads run beside
++// the down projection's instead of after it.  Past the barrier every block adds all the partials itself, in the order
++// of the down kernel's last block: lo, rs and the injection are bitwise the two kernels' (block 0 writes them out), and
++// so is everything after.  The FB blocks are one an SM at most, of 82: they are all resident beside any kernel left
++// spinning on a flag (a block of a few threads), so the barrier never waits on a block that cannot start; past ~1 s
++// of waiting it traps rather than hang the GPU.
++constexpr int FB = DS * DG;                              // 80 blocks
++constexpr int FUB = UPM_BLOCKS / FB;                     // 2 up blocks each
++constexpr int FROWS = HC * UPM_COLS;                     // an up block's rows
++constexpr int F_CODES = FUB * FROWS * LR;                // bytes of codes a block: 40960
++constexpr int F_SMEM = F_CODES + FUB * FROWS * (LR / 32) * 2;
++static_assert(FUB * FB == UPM_BLOCKS && DTH >= THREADS && (UPM_COLS * LR) % 16 == 0 &&
++              (UPM_COLS * (LR / 32) * 2) % 16 == 0, "fused geometry");
++
++__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
++    const unsigned a = (unsigned) __cvta_generic_to_shared(smem);
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(a), "l"(gmem));
++}
++
++// every block of the grid here before any goes on; cnt left 0, gen counts the barriers
++__device__ __forceinline__ void grid_wait(unsigned* cnt, unsigned* gen) {
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        const unsigned g0 = *(volatile unsigned*) gen;
++        __threadfence();
++        if (atomicAdd(cnt, 1u) == (unsigned) (FB - 1)) {
++            *(volatile unsigned*) cnt = 0u;
++            __threadfence();
++            atomicAdd(gen, 1u);
++        } else {
++            const long long t0 = clock64();
++            while (*(volatile unsigned*) gen == g0)
++                if (clock64() - t0 > 2000000000ll) __trap();
++        }
++        __threadfence();
++    }
++    __syncthreads();
++}
++
++template <int TT>
++__global__ void __launch_bounds__(DTH, 1) gr_fused_q8_kernel(GrMulti m, float* __restrict__ scratch) {
++    static_assert(TT >= 1 && TT <= DT, "tokens a launch");
++    extern __shared__ __align__(16) unsigned char fsm[];
++    unsigned char* const codes = fsm;                                   // [FUB * FROWS][LR]
++    const uint16_t* const scales = reinterpret_cast<const uint16_t*>(fsm + F_CODES);   // [FUB * FROWS][LR / 32]
++    __shared__ __align__(16) float4 xs[TT][DNF];
++    __shared__ float ssw[TT][DW];
++    __shared__ float s_rs[TT][HC];
++    __shared__ __align__(16) float4 lo4[TT][2][LR / 8];
++    __shared__ float gsh[TT][HC][UPM_COLS];
++    __shared__ float gss[TT][HC][UPM_COLS];
++    __shared__ float gse[TT][HC][UPM_COLS];
++    // the up blocks' epilogue inputs, staged with the codes: R (pre-write), w_norm, bo_prev, est_norm / est_gates
++    __shared__ __align__(16) float e_R[TT][FUB][HC][UPM_COLS];
++    __shared__ __align__(16) float e_wn[FUB][HC][UPM_COLS];
++    __shared__ __align__(16) float e_bo[TT][FUB][UPM_COLS];
++    __shared__ __align__(16) float e_en[FUB][HC][UPM_COLS];
++    __shared__ __align__(16) float e_eg[FUB][HC][UPM_COLS];
++    unsigned* ctr = reinterpret_cast<unsigned*>(scratch + SC_CTR);
++    float* ssp = scratch + SC_SSP;
++    float* part = scratch + SC_PART;
++    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
++    const int s = blockIdx.x, g = blockIdx.y, fb = g * DS + s;
++    const bool has_inj = m.a[0].w_inject != nullptr;
++    // the up blocks' codes and scales on their way (an up block's rows of one stream are contiguous)
++#pragma unroll
++    for (int u = 0; u < FUB; ++u) {
++        const int d0 = (fb + u * FB) * UPM_COLS;
++#pragma unroll
++        for (int c = 0; c < HC; ++c) {
++            const size_t row0 = (size_t) c * N + d0;
++            const int srow = (u * HC + c) * UPM_COLS;
++            const unsigned char* qs = reinterpret_cast<const unsigned char*>(m.a[0].q_up + row0 * LR);
++            for (int i = t; i < UPM_COLS * LR / 16; i += DTH) cp_async16(codes + (size_t) srow * LR + i * 16, qs + i * 16);
++            const unsigned char* ss = reinterpret_cast<const unsigned char*>(m.a[0].s_up + row0 * (LR / 32));
++            unsigned char* sd = fsm + F_CODES + (size_t) srow * (LR / 32) * 2;
++            for (int i = t; i < UPM_COLS * (LR / 32) * 2 / 16; i += DTH) cp_async16(sd + i * 16, ss + i * 16);
++        }
++    }
++    {   // 16 columns of a stream: 4 chunks of 16 bytes
++        const bool est = m.a[0].est_norm != nullptr;
++        constexpr int Q = UPM_COLS / 4;
++        for (int i = t; i < FUB * HC * Q; i += DTH) {
++            const int u = i / (HC * Q), c = (i / Q) % HC, q = i % Q;
++            const size_t off = (size_t) c * N + (fb + u * FB) * UPM_COLS + 4 * q;
++            cp_async16(&e_wn[u][c][4 * q], m.a[0].w_norm + off);
++            if (est) {
++                cp_async16(&e_en[u][c][4 * q], m.a[0].est_norm + off);
++                cp_async16(&e_eg[u][c][4 * q], m.a[0].est_gates + off);
++            }
++#pragma unroll
++            for (int k = 0; k < TT; ++k) cp_async16(&e_R[k][u][c][4 * q], m.a[k].R + off);
++            if (c == 0)
++#pragma unroll
++                for (int k = 0; k < TT; ++k)
++                    if (m.a[k].apply) cp_async16(&e_bo[k][u][4 * q], m.a[k].bo_prev + (fb + u * FB) * UPM_COLS + 4 * q);
++        }
++    }
++    asm volatile("cp.async.commit_group;");
++    {   // ---- gr_down_q8_split_kernel's work, to the partials ----
++        const int c = s / DSPC, col0 = s * DCS;
++        const bool inj_warp = warp == DQW;
++        const int rq0 = g * (DQW * DQR) + warp * DQR;
++        float4 pr[TT], pb[TT], pw = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
++        if (t < DNF) {
++            pw = *reinterpret_cast<const float4*>(m.a[0].w_norm + col0 + 4 * t);
++#pragma unroll
++            for (int k = 0; k < TT; ++k) {
++                const FusedGrArgs& a = m.a[k];
++                pr[k] = *reinterpret_cast<const float4*>(a.R + col0 + 4 * t);
++                if (a.apply) pb[k] = *reinterpret_cast<const float4*>(a.bo_prev + col0 - c * N + 4 * t);
++            }
++        }
++        uint2 w[DQR][DSTEPS];
++        float sc[DQR][DSTEPS];
++        uint4 wi[DSTEPS];
++        if (!inj_warp) {
++#pragma unroll
++            for (int i = 0; i < DQR; ++i) {
++                const int8_t* row = m.a[0].q_down + (size_t) (rq0 + i) * D + col0;
++                const uint16_t* srow = m.a[0].s_down + (size_t) (rq0 + i) * (D / 32) + col0 / 32;
++#pragma unroll
++                for (int j = 0; j < DSTEPS; ++j) {
++                    w[i][j] = __ldg(reinterpret_cast<const uint2*>(row) + j * 32 + lane);
++                    sc[i][j] = f16f(__ldg(srow + (j * 32 + lane) / 4));
++                }
++            }
++        } else {
++            const uint16_t* row = m.a[0].w_inject + (size_t) (has_inj ? g : 0) * D + col0;
++            const uint4* w4 = reinterpret_cast<const uint4*>(row) + lane;
++#pragma unroll
++            for (int j = 0; j < DSTEPS; ++j) wi[j] = has_inj ? __ldg(w4 + j * 32) : make_uint4(0, 0, 0, 0);
++        }
++#pragma unroll
++        for (int k = 0; k < TT; ++k) {
++            const FusedGrArgs& a = m.a[k];
++            const float gw = a.apply ? 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC) : 0.0f;
++            float sq = 0.0f;
++            if (t < DNF) {
++                float4 r = pr[k];
++                if (a.apply) {
++                    r.x = fmaf(pb[k].x, gw, r.x); r.y = fmaf(pb[k].y, gw, r.y);
++                    r.z = fmaf(pb[k].z, gw, r.z); r.w = fmaf(pb[k].w, gw, r.w);
++                }
++                sq = fmaf(r.x, r.x, sq); sq = fmaf(r.y, r.y, sq); sq = fmaf(r.z, r.z, sq); sq = fmaf(r.w, r.w, sq);
++                xs[k][(t & 1) * (DNF / 2) + (t >> 1)] = make_float4(r.x * pw.x, r.y * pw.y, r.z * pw.z, r.w * pw.w);
++            }
++            sq = warp_sum(sq);
++            if (lane == 0) ssw[k][warp] = sq;
++        }
++        __syncthreads();
++        if (t < TT) {
++            float sq = 0.0f;
++#pragma unroll
++            for (int q = 0; q < DW; ++q) sq += ssw[t][q];
++            ssp[(g * DS + s) * DT + t] = sq;
++        }
++        if (!inj_warp) {
++            float acc[DQR * TT];
++#pragma unroll
++            for (int e = 0; e < DQR * TT; ++e) acc[e] = 0.0f;
++#pragma unroll
++            for (int j = 0; j < DSTEPS; ++j) {
++                float4 x0[TT], x1[TT];
++#pragma unroll
++                for (int k = 0; k < TT; ++k) { x0[k] = xs[k][j * 32 + lane]; x1[k] = xs[k][DNF / 2 + j * 32 + lane]; }
++#pragma unroll
++                for (int i = 0; i < DQR; ++i)
++#pragma unroll
++                    for (int k = 0; k < TT; ++k)
++                        acc[i * TT + k] = fmaf(sc[i][j], dot8q(w[i][j], x0[k], x1[k]), acc[i * TT + k]);
++            }
++            auto emit = [=](int vi, float sum) {
++                const int i = vi / TT, k = vi - i * TT;
++                part[(s * DT + k) * NR + rq0 + i] = sum;
++            };
++            reduce_chunks<DQR * TT, 0, DQR * TT>(acc, lane, emit);
++        } else if (has_inj) {
++            float acc[TT];
++#pragma unroll
++            for (int k = 0; k < TT; ++k) acc[k] = 0.0f;
++#pragma unroll
++            for (int j = 0; j < DSTEPS; ++j)
++#pragma unroll
++                for (int k = 0; k < TT; ++k) acc[k] += dot8h(wi[j], xs[k][j * 32 + lane], xs[k][DNF / 2 + j * 32 + lane]);
++            auto emit = [=](int k, float sum) { part[(s * DT + k) * NR + LR + g] = sum; };
++            reduce_chunks<TT, 0, TT>(acc, lane, emit);
++        }
++    }
++    __threadfence();
++    grid_wait(ctr + 8, ctr + 9);
++    // ---- every partial, added as the down kernel's last blocks do (group 0's sums of squares: each group's are
++    // the same, bitwise) ----
++    if (t < TT * HC) {
++        const int k = t / HC, cc = t - k * HC;
++        float sq = 0.0f;
++#pragma unroll
++        for (int q = 0; q < DSPC; ++q) sq += __ldcg(ssp + (cc * DSPC + q) * DT + k);
++        s_rs[k][cc] = rsqrtf(sq / (float) N + m.a[0].eps);
++    }
++    __syncthreads();
++    constexpr int PER = (TT * NR + FB - 1) / FB;   // this block's share of the (token, row) sums
++    for (int e = fb * PER + t; e < min(TT * NR, (fb + 1) * PER); e += DTH) {
++        const int k = e / NR, rb = e - k * NR;
++        if (rb >= LR && !has_inj) continue;
++        float y = 0.0f;
++#pragma unroll
++        for (int cc = 0; cc < HC; ++cc) {
++            float p = 0.0f;
++#pragma unroll
++            for (int q = 0; q < DSPC; ++q) p += __ldcg(part + ((cc * DSPC + q) * DT + k) * NR + rb);
++            y = fmaf(s_rs[k][cc], p, y);
++        }
++        if (rb >= LR) {
++            m.a[k].inject_out[rb - LR] = y;
++        } else {
++            const float x = y / (float) HC;
++            m.a[k].lo[rb] = x / (1.0f + __expf(-x));
++        }
++    }
++    if (fb == 0 && t < TT * HC) m.a[t / HC].rs[t % HC] = s_rs[t / HC][t % HC];
++    __threadfence();
++    grid_wait(ctr + 8, ctr + 9);
++    for (int i = t; i < TT * LR / 4; i += DTH) {
++        const int k = i / (LR / 4), f = i - k * (LR / 4);
++        lo4[k][f & 1][f >> 1] = __ldcg(reinterpret_cast<const float4*>(m.a[k].lo) + f);
++    }
++    asm volatile("cp.async.wait_all;" ::: "memory");
++    __syncthreads();
++    // ---- gr_up_q8_multi_kernel's work for the block's up blocks, its codes from shared memory ----
++    constexpr int RW = TT <= 4 ? 4 : 2;
++    constexpr int NV = pow2_at_least(TT * RW);
++    constexpr int LPV = 32 / NV;
++    const bool est = m.a[0].est_norm != nullptr;
++    const int vi = xor_scatter_index<NV>(lane);
++    const int vq = vi / TT, vk = vi - vq * TT;
++    const bool epi = (lane & (LPV - 1)) == 0 && vi < TT * RW;
++#pragma unroll 1
++    for (int u = 0; u < FUB; ++u) {
++        const int d0 = (fb + u * FB) * UPM_COLS;
++        if (warp < WARPS)
++            for (int r0 = warp * UPM_ROWS; r0 < (warp + 1) * UPM_ROWS; r0 += RW) {
++                uint2 wa[RW], wb[RW];
++                float sa[RW], sb[RW];
++#pragma unroll
++                for (int q = 0; q < RW; ++q) {
++                    const int sr = u * FROWS + r0 + q;   // row r0 + q of the up block: stream r / UPM_COLS, column r % UPM_COLS
++                    const uint2* w2 = reinterpret_cast<const uint2*>(codes + (size_t) sr * LR);
++                    const uint16_t* srow = scales + (size_t) sr * (LR / 32);
++                    wa[q] = w2[lane];
++                    sa[q] = f16f(srow[lane / 4]);
++                    const bool two = lane < LR / 8 - 32;
++                    wb[q] = two ? w2[32 + lane] : make_uint2(0, 0);
++                    sb[q] = two ? f16f(srow[(32 + lane) / 4]) : 0.0f;
++                }
++                const int er = r0 + vq, ec = er / UPM_COLS, edd = er - ec * UPM_COLS, ei = ec * N + d0 + edd;
++                float rv = 0.0f, wn = 0.0f, rsc = 0.0f, bo = 0.0f, ip = 0.0f, en = 0.0f, eg = 0.0f;
++                bool apply = false;
++                if (epi) {
++                    const FusedGrArgs& a = m.a[vk];
++                    rv = e_R[vk][u][ec][edd];
++                    wn = e_wn[u][ec][edd];
++                    rsc = s_rs[vk][ec];
++                    apply = a.apply;
++                    if (apply) { bo = e_bo[vk][u][edd]; ip = a.inj_prev[ec]; }
++                    if (est) { en = e_en[u][ec][edd]; eg = e_eg[u][ec][edd]; }
++                }
++                float v[NV];
++#pragma unroll
++                for (int q = 0; q < RW; ++q)
++#pragma unroll
++                    for (int k = 0; k < TT; ++k) {
++                        float acc = sa[q] * dot8q(wa[q], lo4[k][0][lane], lo4[k][1][lane]);
++                        if (lane < LR / 8 - 32)
++                            acc = fmaf(sb[q], dot8q(wb[q], lo4[k][0][32 + lane], lo4[k][1][32 + lane]), acc);
++                        v[q * TT + k] = acc;
++                    }
++#pragma unroll
++                for (int e = TT * RW; e < NV; ++e) v[e] = 0.0f;
++                xor_scatter<NV>(v, lane);
++                if (epi) {
++                    float x = rv;
++                    if (apply) {
++                        x = fmaf(bo, 2.0f * sigmoidf_(ip / (float) HC), x);
++                        m.a[vk].R_out[ei] = x;
++                    }
++                    const float y = x * wn * rsc;
++                    const float gate = sigmoidf_(v[0]);
++                    gsh[vk][ec][edd] = y * gate;
++                    gss[vk][ec][edd] = gate;
++                    gse[vk][ec][edd] = x * rsc * en * eg;
++                }
++            }
++        __syncthreads();
++        for (int i = t; i < TT * UPM_COLS; i += DTH) {
++            const int k = i / UPM_COLS, col = i - k * UPM_COLS;
++            float sum = 0.0f;
++#pragma unroll
++            for (int c = 0; c < HC; ++c) sum += gsh[k][c][col];
++            m.a[k].mixed[d0 + col] = sum / (float) HC;
++        }
++        if (est)
++            for (int i = t; i < TT * UPM_COLS; i += DTH) {
++                const int k = i / UPM_COLS, col = i - k * UPM_COLS;
++                float sum = 0.0f;
++#pragma unroll
++                for (int c = 0; c < HC; ++c) sum += gse[k][c][col];
++                m.a[k].est[d0 + col] = sum / (float) HC;
++            }
++        if (m.a[0].gate_ema != nullptr && t < HC * UPM_COLS) {
++            const int c = t / UPM_COLS, col = t - c * UPM_COLS;
++            float sum = 0.0f;
++#pragma unroll
++            for (int k = 0; k < TT; ++k) sum += gss[k][c][col];
++            float* e = m.a[0].gate_ema + (size_t) c * N + d0 + col;
++            *e += 0.25f * (sum / (float) TT - *e);
++        }
++        __syncthreads();
++    }
++}
+ }  // namespace
+ 
+ size_t fused_gr_scratch_bytes() { return (size_t) SC_FLOATS * sizeof(float); }
+@@ -590,6 +913,29 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void*
+     }
+     m.T = n_tok;
+     cudaStream_t st = (cudaStream_t) stream;
++    static const bool fused = [] { const char* e = std::getenv("STRATA_HC_FUSED"); return e != nullptr && e[0] == '1'; }();
++    if (fused && a[0].q_down != nullptr && a[0].q_up != nullptr && n_tok <= DT) {
++        static bool attr = [] {
++            bool ok = true;
++#define STRATA_ATTR(T) ok &= cudaFuncSetAttribute(gr_fused_q8_kernel<T>, cudaFuncAttributeMaxDynamicSharedMemorySize, F_SMEM) == cudaSuccess;
++            STRATA_ATTR(1) STRATA_ATTR(2) STRATA_ATTR(3) STRATA_ATTR(4)
++#undef STRATA_ATTR
++            return ok;
++        }();
++        (void) attr;
++        const dim3 grid(DS, DG);
++        switch (n_tok) {
++#define STRATA_FUSED(T) case T: gr_fused_q8_kernel<T><<<grid, DTH, F_SMEM, st>>>(m, scratch); break;
++            STRATA_FUSED(1) STRATA_FUSED(2) STRATA_FUSED(3) STRATA_FUSED(4)
++#undef STRATA_FUSED
++        }
++        const cudaError_t e = cudaGetLastError();
++        if (e != cudaSuccess) {
++            std::fprintf(stderr, "fused_gr_read_multi (fused): %s\n", cudaGetErrorString(e));
++            std::exit(1);
++        }
++        return;
++    }
+     const dim3 down_grid(DS, DG);
+     for (int t0 = 0; t0 < n_tok; t0 += DT) {   // DT tokens a down launch; each token's arithmetic is the same
+         GrMulti md;
