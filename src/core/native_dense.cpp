@@ -122,6 +122,15 @@ NativeDense::~NativeDense() {
     for (void* p : weights_) cudaFree(p);
 }
 
+bool NativeDense::release(const void* data, uint64_t bytes) {
+    const auto it = std::find(weights_.begin(), weights_.end(), data);
+    if (it == weights_.end()) return false;
+    cudaFree(*it);
+    weights_.erase(it);
+    bytes_ -= std::min(bytes_, bytes);
+    return true;
+}
+
 bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err,
                        bool include_ple_key) {
     if (scratch_ || !weights_.empty()) { err = "native dense: already loaded"; return false; }
@@ -297,6 +306,15 @@ bool HcQ8::names(const std::vector<std::string>& shards, std::set<std::string>& 
 
 HcQ8::~HcQ8() {
     for (void* p : allocs_) cudaFree(p);
+}
+
+bool HcQ8::release(const void* data, uint64_t bytes) {
+    const auto it = std::find(allocs_.begin(), allocs_.end(), data);
+    if (it == allocs_.end()) return false;
+    cudaFree(*it);
+    allocs_.erase(it);
+    bytes_ -= std::min(bytes_, bytes);
+    return true;
 }
 
 bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err) {

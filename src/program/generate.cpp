@@ -47,6 +47,7 @@
 #include "strata/core/native_head.hpp"
 #include "strata/core/verify.hpp"
 #include "strata/core/decode_split.hpp"
+#include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/prompt_cache.hpp"
 #include "strata/prefill/experts.hpp"
@@ -2140,6 +2141,7 @@ int main(int argc, char** argv) {
     const int64_t n_vocab = wo->ne1;
     strata::core::NativeHead native_head;
     std::unique_ptr<strata::core::SplitHead> split_head;
+    strata::core::DecodeSplit dsplit;   // --decode-split's second stage
     if (!o.native_head_gguf.empty()) {
         std::vector<std::string> head_shards;
         try {
@@ -2154,6 +2156,18 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "strata generate: native head, type %d, %llu bytes\n", native_head.type(),
                      (unsigned long long) native_head.weight_bytes());
+        // --decode-split: the head runs on the last stage's GPU; the drafter takes its draft head's rows first, and only
+        // a token part of the head stays here
+        if (o.decode_split > 0) {
+            std::string e2;
+            const uint64_t before = native_head.weight_bytes();
+            if ((!o.mtp.empty() && !mtp.bind_head(&native_head, e2)) || !native_head.keep_rows(256, e2)) {
+                std::fprintf(stderr, "strata generate: --decode-split: the head here: %s\n", e2.c_str());
+                return 1;
+            }
+            std::fprintf(stderr, "strata generate: --decode-split: %.0f MiB of the head freed here\n",
+                         (double) (before - native_head.weight_bytes()) / 1048576.0);
+        }
         // the head's last rows on the second GPU (split_head.hpp): each GPU streams its part after the last layer.
         // The drafter gathers its draft head's rows first; without one it needs the whole head here.
         if (o.second_gpu >= 0 && o.head_split > 0.0 && o.head_split < 1.0 && o.spec >= 2) {
@@ -2181,6 +2195,61 @@ int main(int argc, char** argv) {
     // `open` sees the memory this process actually has left rather than the card's idle figure - and refuses with
     // both numbers if the slots do not fit, instead of handing back a cache smaller than it was asked for.
     mem_mark("the weights, the session, the drafter and the head");
+    // --decode-split: the second GPU's stage before either GPU's tier sizes itself: copies of its layers' dense weights
+    // and the head there.  The main GPU's own copies of those layers go back; their references then point at the second
+    // GPU's (over P2P), so anything here that still reads one gets it right, only slower.
+    if (o.decode_split > 0) {
+        second_ctx.join();
+        int can01 = 0, can10 = 0;
+        cudaDeviceCanAccessPeer(&can01, o.main_gpu, o.second_gpu);
+        cudaDeviceCanAccessPeer(&can10, o.second_gpu, o.main_gpu);
+        if (!can01 || !can10) {
+            std::fprintf(stderr, "strata generate: --decode-split needs P2P between GPUs %d and %d\n", o.main_gpu,
+                         o.second_gpu);
+            return 2;
+        }
+        cudaSetDevice(o.second_gpu);
+        cudaDeviceEnablePeerAccess(o.main_gpu, 0);
+        cudaSetDevice(o.main_gpu);
+        cudaDeviceEnablePeerAccess(o.second_gpu, 0);
+        (void) cudaGetLastError();   // already enabled
+        std::vector<std::string> shards;
+        try {
+            shards = strata::gguf_split_paths(o.native_head_gguf);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata generate: --decode-split: %s\n", e.what());
+            return 1;
+        }
+        // STRATA_DSPLIT_DEV=n (a test): the second stage on another device, the main GPU's own included
+        const char* dd = std::getenv("STRATA_DSPLIT_DEV");
+        if (!dsplit.init(wt, g, ss, (int64_t) o.decode_split, dd != nullptr ? std::atoi(dd) : o.second_gpu, o.main_gpu,
+                         shards, n_vocab, err)) {
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
+        }
+        uint64_t freed = 0;
+        if (dd == nullptr)
+            for (const auto& [name, r2] : dsplit.weights().all()) {
+                if (name.rfind("blk.", 0) != 0) continue;
+                const strata::core::WeightRef* r1 = wt.find(name);
+                if (r1 == nullptr) continue;
+                strata::core::WeightRef r = r2;
+                r.native_q8_1 = r1->native_q8_1;   // the token path's activation scratch, here
+                int be = 0, bb = 0;
+                if (r1->native_data != nullptr && strata::block_geometry((uint32_t) r1->native_type, be, bb) && be > 0) {
+                    const uint64_t n = (uint64_t) (r1->ne0 * r1->ne1 / be) * (uint64_t) bb;
+                    if (native_dense.release(r1->native_data, n)) freed += n;
+                }
+                if (r1->hc_codes != nullptr && hc_q8.release(r1->hc_codes, (uint64_t) (r1->ne0 * r1->ne1)))
+                    freed += (uint64_t) (r1->ne0 * r1->ne1);
+                if (r1->hc_scales != nullptr && hc_q8.release(r1->hc_scales, (uint64_t) (r1->ne0 * r1->ne1 / 32) * 2))
+                    freed += (uint64_t) (r1->ne0 * r1->ne1 / 32) * 2;
+                wt.put(name, r);
+            }
+        std::fprintf(stderr, "strata generate: --decode-split: layers %lld.. and the head on GPU %d (%.0f MiB); %.0f MiB of "
+                             "their weights freed here\n", (long long) o.decode_split, dsplit.device(),
+                     (double) dsplit.bytes() / 1048576.0, (double) freed / 1048576.0);
+    }
     strata::core::ExpertCache xcache;
     std::vector<std::pair<int32_t, int32_t>> profile;
     if (!o.expert_profile.empty()) {
@@ -3062,7 +3131,6 @@ int main(int argc, char** argv) {
     // slots for every layer, which its own adaptive tier fills with the conversation's experts the first tier has not.
     // Without free VRAM there (another process holds it) the engine runs on the main GPU alone.
     strata::core::SecondGpu gpu2;
-    strata::core::DecodeSplit dsplit;
     std::vector<int32_t> host_res2;
     strata::core::AdaptiveTier tier2;
     second_ctx.join();
@@ -3088,25 +3156,6 @@ int main(int argc, char** argv) {
         }
         bool ok = gpu2.init(o.second_gpu, main_dev, g.n_embd, g.n_ff, o.max_window(), ss.k, err) &&
                   gpu2.init_prefetch((int) std::min<uint64_t>(pf_bytes / min_blob, 64), lay0.max_blob, err);
-        if (ok && o.decode_split > 0) {   // its stage's weights, head and session, before its tier takes the rest
-            std::vector<std::string> shards;
-            try {
-                shards = strata::gguf_split_paths(o.native_head_gguf);
-            } catch (const std::exception& e) {
-                err = e.what();
-                ok = false;
-            }
-            // STRATA_DSPLIT_DEV=n (a test): the second stage on another device, the main GPU's own included
-            const char* dd = std::getenv("STRATA_DSPLIT_DEV");
-            ok = ok && dsplit.init(wt, g, ss, (int64_t) o.decode_split, dd != nullptr ? std::atoi(dd) : o.second_gpu,
-                                   main_dev, shards, n_vocab, err);
-            if (!ok) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
-                return 1;
-            }
-            std::fprintf(stderr, "strata generate: --decode-split: layers %lld.. and the head on GPU %d, %.0f MiB\n",
-                         (long long) o.decode_split, o.second_gpu, (double) dsplit.bytes() / 1048576.0);
-        }
         const auto& lay = strata::kernels::cpu::expert_layout();
         std::vector<int64_t> sizes;
         std::vector<std::pair<int32_t, int32_t>> pre;

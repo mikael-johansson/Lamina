@@ -196,7 +196,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
 
     const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
     head_rows_ = (head != nullptr && head->loaded()) ? head->rows() : n_vocab_;
-    if (head_rows_ != n_vocab_ && (shead_ == nullptr || shead_->split() != head_rows_)) {
+    if (l1_ == g.n_layers && head_rows_ != n_vocab_ && (shead_ == nullptr || shead_->split() != head_rows_)) {
         err = "verify: the head holds part of the vocabulary without its other part";
         return false;
     }

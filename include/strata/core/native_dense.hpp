@@ -27,6 +27,9 @@ public:
                              std::set<std::string>& out, std::string& err);
     uint64_t weight_bytes() const { return bytes_; }
     size_t tensor_count() const { return weights_.size(); }
+    /// Frees the matrix at `data` (a WeightRef's native_data) once nothing here uses it any more (--decode-split: the
+    /// layers another GPU runs); its bytes are no longer counted.  False when it is not one of these.
+    bool release(const void* data, uint64_t bytes);
 
 private:
     std::vector<void*> weights_;
@@ -50,6 +53,8 @@ public:
     uint64_t bytes() const { return bytes_; }
     size_t matrices() const { return allocs_.size() / 2; }
     size_t stored_q8_0() const { return q8_0_; }   ///< of them taken as the GGUF stores them
+    /// As NativeDense::release, for a matrix's codes or scales.
+    bool release(const void* data, uint64_t bytes);
 private:
     std::vector<void*> allocs_;
     uint64_t bytes_ = 0;
