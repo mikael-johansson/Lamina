@@ -810,6 +810,7 @@ struct BatchSlot {
     int id = 0;
     bool made = false;                 // its sessions, windows and drafter exist
     std::atomic<bool> active{false};   // between its BADM 1 and its BDONE
+    bool reserved = false;             // its pages are an admission's, from its BGEN's check on (pg_mu)
     std::atomic<bool> stop{false};     // BSTOP
     int64_t cells = 0;                 // its logical cells (STRATA_SLOT_CELLS)
     strata::core::SessionState ss1, ss2;   // the main GPU's (layers before the split, PLE) and the second's
@@ -3483,6 +3484,7 @@ int main(int argc, char** argv) {
         vh2.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         ver.set_host_rows(true);   // the rows the second stage reads (its input; set before the first window)
         cudaSetDevice(dsplit.device());
+        v2->set_tag("solo B");
         v2->set_layers(dsplit.at(), g.n_layers);
         v2->set_input_rows(ver.final_R_host());
         v2->set_host_rows(true);
@@ -4113,6 +4115,7 @@ int main(int argc, char** argv) {
         Stages st{&ver, ver2, o.main_gpu, ver2 != nullptr ? dsplit.device() : -1, &drive, g.hc * g.n_embd};
         mem_mark("the verifier and the drafter's binding");
         ver.set_split(o.spec_split);
+        ver.set_tag(o.decode_split > 0 ? "solo A" : "solo");
         ver.set_profile(o.window_profile);
         ver.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : o.pcie_mode == "kernel" ? 2
                           : native_pack ? 0 : 2);   // auto: DMA for the native packs, the copy kernel for Q2_0
@@ -4542,20 +4545,42 @@ int main(int argc, char** argv) {
                 if (want <= have) return true;
                 n = want - have;
                 const int64_t below = b.runs.empty() ? -1 : b.runs.back().first;
-                a0 = take_pages(n, below);
-                for (auto& o2 : slots)   // an ended slot's pages, when the pool has none left
-                    if (a0 < 0 && o2.get() != &b && !o2->active.load() && !o2->runs.empty()) {
+                // the pages in runs: one when a run of n is free, else whatever pages are (the page table maps each
+                // page on its own); an ended slot's pages go back when the pool has too few (not a reserved one's)
+                std::vector<std::pair<int64_t, int64_t>> got;
+                auto gather = [&]() -> bool {
+                    got.clear();
+                    if (const int64_t r = take_pages(n, below); r >= 0) { got.emplace_back(r, n); return true; }
+                    if (free_pages() < n) return false;
+                    int64_t left = n;
+                    for (int64_t i = pool_pages - 1; i >= 0 && left > 0; --i)
+                        if (!page_used[(size_t) i]) {
+                            page_used[(size_t) i] = 1;
+                            if (!got.empty() && got.back().first == i + 1) { got.back().first = i; ++got.back().second; }
+                            else got.emplace_back(i, 1);
+                            --left;
+                        }
+                    return true;
+                };
+                bool ok_pages = gather();
+                for (auto& o2 : slots)
+                    if (!ok_pages && o2.get() != &b && !o2->active.load() && !o2->reserved && !o2->runs.empty()) {
                         drop_pages(*o2);
-                        a0 = take_pages(n, below);
+                        ok_pages = gather();
                     }
-                if (a0 < 0) return false;
-                if (!b.runs.empty() && b.runs.back().first == a0 + n) {   // its last run grows down
-                    b.runs.back().first = a0;
-                    b.runs.back().second += n;
-                } else {
-                    b.runs.emplace_back(a0, n);
+                if (!ok_pages) return false;
+                a0 = got.front().first;
+                int64_t at = have;
+                for (const auto& [r0, rn] : got) {
+                    if (!b.runs.empty() && b.runs.back().first == r0 + rn) {   // its last run grows down
+                        b.runs.back().first = r0;
+                        b.runs.back().second += rn;
+                    } else {
+                        b.runs.emplace_back(r0, rn);
+                    }
+                    for (int64_t k = 0; k < rn; ++k) b.map[(size_t) (at + k)] = (int32_t) (r0 + k);
+                    at += rn;
                 }
-                for (int64_t k = 0; k < n; ++k) b.map[(size_t) (have + k)] = (int32_t) (a0 + k);
                 low = pool_pages;
                 for (int64_t i = 0; i < pool_pages; ++i) if (page_used[(size_t) i]) { low = i; break; }
             }
@@ -4962,6 +4987,7 @@ int main(int argc, char** argv) {
             b.ss1.ple.prev = b.ss1.ple_prev;
             b.ss1.ple.hist = b.ss1.ple_hist;
             if (b.made) return true;
+            b.A.set_tag("slot " + std::to_string(b.id) + " A");
             b.A.set_layers(0, L);
             b.A.set_host_rows(true);
             if (!b.A.init(wt, g, b.ss1, vh, &native_head, W, e)) return false;
@@ -4973,6 +4999,7 @@ int main(int argc, char** argv) {
             vh2.slots = gpu2.cache().slots();
             vh2.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
             cudaSetDevice(dev2);
+            b.B.set_tag("slot " + std::to_string(b.id) + " B");
             b.B.set_layers(L, g.n_layers);
             b.B.set_input_rows(b.A.final_R_host());
             b.B.set_host_rows(true);
@@ -5113,18 +5140,22 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
-            if (admit >= 0) {   // a slot's logical cells, and the shared pool's pages (free, or an ended slot's), hold it
-                int64_t room = 0;
-                {
-                    std::lock_guard<std::mutex> lk(pg_mu);
-                    room = free_pages();
-                    for (auto& b : slots)
-                        if (!b->active.load()) for (const auto& r : b->runs) room += r.second;
+            if (admit >= 0) {   // a slot's logical cells, and the shared pool's pages, reserved for it now: the running
+                // slots grow while the prompt is read, and an admission short of pages then could only end the request
+                BatchSlot& rb = *slots[(size_t) admit];
+                std::string me;
+                bool room = n + 8192 <= slot_cells && make_slot(rb, me);
+                if (room) {
+                    { std::lock_guard<std::mutex> lk(pg_mu); rb.reserved = true; }
+                    room = map_pages(rb, n + 4096);
+                    if (!room) { std::lock_guard<std::mutex> lk(pg_mu); rb.reserved = false; }
                 }
-                const int64_t need = (n + 4096 + page_cells - 1) / page_cells;
-                if (n + 8192 > slot_cells || need > room) {
+                if (!room) {
+                    int64_t free_cells = 0;
+                    { std::lock_guard<std::mutex> lk(pg_mu); free_cells = free_pages() * page_cells; }
                     std::printf("ERR BGEN: no room for a conversation of %lld tokens (a slot holds %lld; the K/V pool has "
-                                "%lld cells free)\n", (long long) n, (long long) slot_cells, (long long) (room * page_cells));
+                                "%lld cells free%s%s)\n", (long long) n, (long long) slot_cells, (long long) free_cells,
+                                me.empty() ? "" : "; ", me.c_str());
                     std::fflush(stdout);
                     continue;
                 }
@@ -5728,16 +5759,18 @@ int main(int argc, char** argv) {
                             last_T > 0 && p + W + 1 <= slot_cells;
                 std::string e;
                 if (cont && !make_slot(b, e)) { report(e); return 1; }
+                {   // its pages are this conversation's from here (reserved at the BGEN's check; the copy below
+                    // overwrites what its last one left)
+                    std::lock_guard<std::mutex> lk(pg_mu);
+                    b.reserved = false;
+                    b.held.clear();
+                }
+                if (cont && !map_pages(b, p + 4096)) {
+                    std::fprintf(stderr, "strata serve: batch slot %d: the K/V pool has no room for %lld cells; the "
+                                         "request ends here\n", admit, (long long) p);
+                    cont = false;
+                }
                 if (cont) {
-                    {   // its pages: its last conversation's go, the prompt's and 4096 cells more come
-                        std::lock_guard<std::mutex> lk(pg_mu);
-                        drop_pages(b);
-                    }
-                    if (!map_pages(b, p + 4096)) {
-                        report("batch slot " + std::to_string(admit) + ": the K/V pool has no room for " +
-                               std::to_string(p) + " cells");
-                        return 1;
-                    }
                     const char* step = nullptr;
                     if (!strata::core::session_copy_layers_mapped(ss, nullptr, b.ss1, b.map.data(), g, p, 0, L, 0, main_cs))
                         step = "the main GPU's layers";

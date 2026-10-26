@@ -624,8 +624,10 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
 // chunk's cells above / at the threshold, one more barrier, and a chunk emits its cells at the counts of the chunks
 // before it.  The grid covers the capacity (a captured graph's), its blocks past a query's A return at once; at most
 // as many as can be resident at once take part (the barriers wait for all of a query's).  The window graphs run one
-// selection at a time on a GPU: a query's barrier state lives in device memory, which its last thread block out
-// clears.  (Upstream's #2072 split top-k took six launches.)
+// selection at a time on a caller's barrier state: a query's lives in device memory (the caller's, else this file's
+// one), which its last thread block out clears.  Concurrent selections on one GPU (batch slots: two windows at once)
+// each need their own (qsa_block_topk_sync_bytes): sharing it, one's arrivals count toward the other's barrier - a
+// hang, or a selection past its barrier with the other's counts.  (Upstream's #2072 split top-k took six launches.)
 constexpr int MT_T = 256, MT_W = MT_T / 32;
 constexpr int MT_ROWS = 8;                         // rows of MT_T blocks a thread holds in registers
 constexpr int MT_CHUNK = MT_ROWS * MT_T;           // blocks a thread block takes at least
@@ -656,7 +658,8 @@ __device__ __forceinline__ void query_barrier(unsigned* arrived, unsigned target
 
 __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __restrict__ scores,
                                                                 const int32_t* __restrict__ steps, int64_t max_blocks,
-                                                                int64_t cap, int32_t* __restrict__ ids) {
+                                                                int64_t cap, int32_t* __restrict__ ids,
+                                                                TopkSync* __restrict__ sync) {
     __shared__ int whist[MT_W][256];
     __shared__ int hist[256];
     __shared__ int s_g[MT_W], s_e[MT_W];
@@ -672,7 +675,7 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
     const int64_t nb = n_bid + 1;                      // with the tail block
     const int A = (int) min((int64_t) gridDim.x, (nb + MT_CHUNK - 1) / MT_CHUNK);
     if (c >= A) return;
-    TopkSync& sy = g_topk_sync[q];
+    TopkSync& sy = (sync != nullptr ? sync : g_topk_sync)[q];
     const int64_t b0 = nb * c / A, b1 = nb * (c + 1) / A, e1 = b1 < n_bid ? b1 : n_bid;   // complete blocks [b0, e1)
     const int tail_w = c == A - 1 ? (int) (n_kv - n_bid * R) : 0;                         // block n_bid's cells
     const int nrows = (int) ((e1 - b0 + MT_T - 1) / MT_T);
@@ -918,8 +921,10 @@ int64_t qsa_select_max_cells(const QsaShapes& s) {
     return ints > 0 ? ints / 64 * TOPK_T * R : 0;
 }
 
+size_t qsa_block_topk_sync_bytes() { return sizeof(TopkSync) * MT_MAXQ; }
+
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
-                    const QsaShapes& s, int32_t* ids, void* stream) {
+                    const QsaShapes& s, int32_t* ids, void* stream, void* sync) {
     if (nq <= 0) return;
     const int64_t tab_rows = topk_tab_rows(max_blocks);
     const size_t smem = topk_smem_bytes(tab_rows, cap);
@@ -947,7 +952,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         const int64_t want = (max_blocks - 1 + MT_CHUNK - 1) / MT_CHUNK;
         const int64_t nch = std::max<int64_t>(1, std::min<int64_t>({want, (int64_t) MT_MAXCH, resident / nq}));
         block_topk_multi_kernel<<<dim3((unsigned) nch, (unsigned) nq), MT_T, 0, (cudaStream_t) stream>>>(
-            scores, steps, max_blocks, cap, ids);
+            scores, steps, max_blocks, cap, ids, (TopkSync*) sync);
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e)); std::exit(1); }
         return;

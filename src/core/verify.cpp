@@ -40,6 +40,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
+#include <mutex>
 #include <exception>
 #include <immintrin.h>
 
@@ -97,8 +99,47 @@ bool native_of(const WeightRef* w, const std::string& name, std::string& err) {
 
 Verifier::Verifier() = default;
 
+namespace {
+std::mutex g_watch_mu;
+std::vector<const Verifier*> g_watch;   // the live verifiers (STRATA_VERIFY_WATCH)
+bool watch_on() {
+    static const bool on = std::getenv("STRATA_VERIFY_WATCH") != nullptr;
+    return on;
+}
+const char* stream_state(cudaStream_t s) {
+    if (s == nullptr) return "-";
+    const cudaError_t e = cudaStreamQuery(s);
+    return e == cudaSuccess ? "idle" : e == cudaErrorNotReady ? "BUSY" : cudaGetErrorString(e);
+}
+}  // namespace
+
+void Verifier::dump(FILE* f) const {
+    auto u = [](const uint32_t* p) -> long long { return p ? (long long) *(volatile const uint32_t*) p : -1; };
+    std::fprintf(f, "  verifier %p '%s' dev %d layers [%lld, %lld) window T=%d pos %lld | seq %lld flag %lld flagA %lld "
+                    "flagB %lld pleflag %lld flag2 %lld/%lld pseq %lld | cs %s side %s shs %s kst %s cps %s g2s %s copy %s "
+                    "ples %s sgs %s\n",
+                 (const void*) this, tag_.c_str(), dev_id_, (long long) l0_, (long long) l1_, (int) run_t_,
+                 (long long) run_pos_, u(h_seq_), u(h_flag_), u(h_flagA_), u(h_flagB_), u(h_pleflag_), u(h_flag2_),
+                 u(h_flag2_ ? h_flag2_ + 16 : nullptr), u(h_pseq_), stream_state(cs_), stream_state(side_),
+                 stream_state(shs_), stream_state(kst_), stream_state(cps_), stream_state(g2s_), stream_state(copy_),
+                 stream_state(ples_), stream_state(sgs_));
+}
+
+void Verifier::dump_all(FILE* f) {
+    std::lock_guard<std::mutex> lk(g_watch_mu);
+    std::fprintf(f, "strata verify watch: %zu live verifiers\n", g_watch.size());
+    for (const Verifier* v : g_watch) v->dump(f);
+    std::fflush(f);
+}
+
 Verifier::~Verifier() {
+    if (watch_on()) {
+        std::lock_guard<std::mutex> lk(g_watch_mu);
+        for (size_t i = 0; i < g_watch.size(); ++i)
+            if (g_watch[i] == this) { g_watch.erase(g_watch.begin() + (ptrdiff_t) i); break; }
+    }
     if (cs_) cudaStreamSynchronize(cs_);
+    if (topk_sync_) cudaFree(topk_sync_);
     for (auto& e : exec_)
         if (e) cudaGraphExecDestroy(e);
     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
@@ -140,6 +181,18 @@ int Verifier::nonfinite(int T) {
 
 bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
                     const NativeHead* head, int max_t, std::string& err) {
+    cudaGetDevice(&dev_id_);
+    if (topk_sync_ == nullptr) {
+        const size_t b = strata::kernels::qsa_block_topk_sync_bytes();
+        if (cudaMalloc(&topk_sync_, b) != cudaSuccess || cudaMemset(topk_sync_, 0, b) != cudaSuccess) {
+            err = "verify: no VRAM for the top-k barrier state";
+            return false;
+        }
+    }
+    if (watch_on()) {
+        std::lock_guard<std::mutex> lk(g_watch_mu);
+        g_watch.push_back(this);
+    }
     if (const char* v = std::getenv("STRATA_NAN_GUARD")) nan_guard_ = !(v[0] == '0' && v[1] == '\0');
     if (const char* v = std::getenv("STRATA_NAN_INJECT"))
         for (const char* c = v; *c != '\0';) {
@@ -754,7 +807,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 qsa_block_scores(st.idx_pooled, st.idx_dead, qidx_ + tb * IQ * ID, step_ + tb * kStepCount, n, max_blocks_,
                                  s, scores_ + (size_t) tb * max_blocks_, side_, qsa_score_grid_blocks);
                 qsa_block_topk(scores_ + (size_t) tb * max_blocks_, step_ + tb * kStepCount, n, max_blocks_, cap_, s,
-                               sel_ + (size_t) tb * cap_, side_);
+                               sel_ + (size_t) tb * cap_, side_, topk_sync_);
                 if (!mark(side_, bjoin_)) return false;
                 quant(xm, N);
                 if (cudaEventRecord(pfork_, cs) != cudaSuccess || cudaStreamWaitEvent(kst_, pfork_, 0) != cudaSuccess ||
@@ -1229,6 +1282,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     for (int t = 0; t < T; ++t) last_tokens_[t] = tokens[t];
     ms_host += ms_since(t0);
     VDBG("staged; launching\n");
+    run_t_ = T;
+    run_pos_ = pos0;
     const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
     if (le != cudaSuccess || cudaEventRecord(done_, cs_) != cudaSuccess) {
         err = std::string("verify: launch: ") + cudaGetErrorString(cudaGetLastError());
@@ -1399,7 +1454,25 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         if (!shead_->submit(T, whole, err)) return false;
         ++done_n_;
     }
-    const cudaError_t se = cudaStreamSynchronize(cs_);
+    cudaError_t se = cudaSuccess;
+    if (watch_on()) {   // the same wait, polled: past 15 s, every live verifier's state (a hang), then on waiting
+        const Clock::time_point w0 = Clock::now();
+        bool dumped = false;
+        for (uint32_t n = 0;; ++n) {
+            se = cudaStreamQuery(cs_);
+            if (se != cudaErrorNotReady) break;
+            _mm_pause();
+            if ((n & 4095u) == 0 && !dumped && ms_since(w0) > 15000.0) {
+                dumped = true;
+                std::fprintf(stderr, "strata verify watch: '%s' (T=%d at %lld) still waits for its graph after 15 s; "
+                                     "its host loop is done\n", tag_.c_str(), T, (long long) pos0);
+                dump_all(stderr);
+            }
+        }
+    } else {
+        se = cudaStreamSynchronize(cs_);
+    }
+    run_t_ = 0;
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
     if (shead_ != nullptr) {   // each token's larger logit; on equality this GPU's, the lower index

@@ -44,8 +44,11 @@ constexpr int64_t qsa_score_grid_blocks = 10496;
 /// of shared memory per 4,096 cells (1,466,368 on the RTX 3090's 99 KiB, 630,784 on a 48 KiB card).
 int64_t qsa_select_max_cells(const QsaShapes& s);
 
-/// ids [nq, cap] (cells, ascending); `cap` >= the largest selection width.
+/// ids [nq, cap] (cells, ascending); `cap` >= the largest selection width.  `sync`: the selection's barrier state,
+/// qsa_block_topk_sync_bytes() of device memory zeroed once (each selection leaves it so); selections that may run at
+/// the same time on one GPU each need their own.  Null: this file's one (a caller that never overlaps another).
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
-                    const QsaShapes& s, int32_t* ids, void* stream);
+                    const QsaShapes& s, int32_t* ids, void* stream, void* sync = nullptr);
+size_t qsa_block_topk_sync_bytes();
 
 }  // namespace strata::kernels

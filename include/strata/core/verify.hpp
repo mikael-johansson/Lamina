@@ -39,6 +39,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -375,6 +376,20 @@ private:
     // then the ends of its shared expert's branch and of the second GPU's rows' branch
     static constexpr int kLayerStamps = 13, kStamps = 15;
     bool profile_ = false;
+    // STRATA_VERIFY_WATCH=1: a window's final wait polls, and past 15 s every live verifier's state is printed (a hang:
+    // a graph that never ends while its host loop is done)
+    std::string tag_;
+    int dev_id_ = -1;
+    void* topk_sync_ = nullptr;       // this verifier's top-k barrier state (qsa_block_topk: windows run at once)
+    volatile int run_t_ = 0;          // the window under way (0: none)
+    volatile int64_t run_pos_ = -1;
+    void dump(FILE* f) const;
+public:
+    /// A name for the watch's dumps ("solo A", "slot 1 B", ...).
+    void set_tag(const std::string& t) { tag_ = t; }
+    /// Every live verifier's state to `f` (STRATA_VERIFY_WATCH).
+    static void dump_all(FILE* f);
+private:
     unsigned long long* stamps_ = nullptr;
     std::vector<unsigned long long> h_stamps_;
     std::vector<double> prof_ns_;                             // [mixer kind (GDN, QSA)][stage], summed
