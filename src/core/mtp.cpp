@@ -88,14 +88,14 @@ MtpDrafter::~MtpDrafter() {
     if (side_) cudaStreamDestroy(side_);
     if (sh_fork_) cudaEventDestroy(sh_fork_);
     if (sh_join_) cudaEventDestroy(sh_join_);
-    if (dense_) cudaFree(dense_);
-    if (experts_) cudaFree(experts_);
+    if (dense_ && !shares_base_) cudaFree(dense_);
+    if (experts_ && !shares_base_) cudaFree(experts_);
     if (state_arena_) cudaFree(state_arena_);
     if (arena_) cudaFree(arena_);
     if (head_logits_) cudaFree(head_logits_);
-    if (dhead_) cudaFree(dhead_);
-    if (dvocab_) cudaFree(dvocab_);
-    if (proxy_) cudaFree(proxy_);
+    if (dhead_ && !shares_base_) cudaFree(dhead_);
+    if (dvocab_ && !shares_base_) cudaFree(dvocab_);
+    if (proxy_ && !shares_base_) cudaFree(proxy_);
     if (proxy_scratch_) cudaFree(proxy_scratch_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
@@ -175,7 +175,41 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
                               "self_attn.v_proj.weight", "self_attn.o_proj.weight", "mlp.shared_expert.gate_proj.weight",
                               "mlp.shared_expert.up_proj.weight", "mlp.shared_expert.down_proj.weight"};
     for (const char* n : required) if (!q8(n)) { err = std::string("mtp: ") + n + " is missing (q8_0)"; return false; }
+    if (!alloc_state(ss, window, err)) return false;
+    char fmts[48] = "Q2_0 blobs";
+    if (nat_.gu_type >= 0) std::snprintf(fmts, sizeof fmts, "ggml types %d/%d", nat_.gu_type, nat_.d_type);
+    std::fprintf(stderr, "strata mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f as %s, dense %.0f)\n",
+                 (double) vram_ / 1048576.0, (double) g.n_expert * blob_ / 1048576.0, fmts,
+                 (double) tensors_.back().off / 1048576.0);
+    return true;
+}
 
+bool MtpDrafter::load_shared(const MtpDrafter& base, SessionState& ss, int max_t, std::string& err) {
+    g_ = base.g_;
+    ss_ = &ss;
+    max_t_ = max_t;
+    rt_dir_ = base.rt_dir_;
+    tensors_ = base.tensors_;
+    dense_ = base.dense_;
+    experts_ = base.experts_;
+    blob_ = base.blob_;
+    nat_ = base.nat_;
+    dhead_ = base.dhead_;
+    dvocab_ = base.dvocab_;
+    n_dvocab_ = base.n_dvocab_;
+    proxy_ = base.proxy_;
+    shares_base_ = true;
+    if (proxy_ != nullptr) {   // the 2-bit copy's scratch is a drafter's own
+        const size_t sb = strata::kernels::draft_proxy_scratch_bytes(n_dvocab_);
+        if (cudaMalloc(&proxy_scratch_, sb) != cudaSuccess) { err = "mtp: the draft head's scratch does not fit"; return false; }
+        cudaMemset(proxy_scratch_, 0, sb);
+    }
+    return alloc_state(ss, base.window_, err);
+}
+
+bool MtpDrafter::alloc_state(SessionState& ss, int64_t window, std::string& err) {
+    const ModelGeometry& g = *g_;
+    const int max_t = max_t_;
     // ---- the layer's own K/V (dense attention: no indexer state is read), FP16 or INT8 (qsa_draft_kv_format)
     const strata::kernels::QsaShapes s = shapes_of(g);
     const int64_t max_cells = ss.qsa_states[0].max_cells;
@@ -259,11 +293,6 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         err = "mtp: streams";
         return false;
     }
-    char fmts[48] = "Q2_0 blobs";
-    if (nat_.gu_type >= 0) std::snprintf(fmts, sizeof fmts, "ggml types %d/%d", nat_.gu_type, nat_.d_type);
-    std::fprintf(stderr, "strata mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f as %s, dense %.0f)\n",
-                 (double) vram_ / 1048576.0, (double) g.n_expert * blob_ / 1048576.0, fmts,
-                 (double) tensors_.back().off / 1048576.0);
     return true;
 }
 

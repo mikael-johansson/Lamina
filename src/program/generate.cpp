@@ -799,6 +799,9 @@ void drive_tail(void* user) {
     }
 }
 
+/// STRATA_DSPLIT_ONEPOOL=1 (the two-request test): both stages' host threads share the one pool, one dispatch at a time.
+std::mutex* g_pool_lock = nullptr;
+
 /// Plan v0.3 P6: the pool for a verify window.
 void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_tok, int64_t k,
                       float* out, int64_t layer) {
@@ -816,7 +819,12 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const fl
         const double gap = std::chrono::duration<double, std::milli>(a - t->tail_at).count();
         if (gap < 20.0) t->gap_ms = t->gap_ms > 0 ? 0.8 * t->gap_ms + 0.2 * gap : gap;
     }
-    strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
+    if (g_pool_lock != nullptr) {
+        std::lock_guard<std::mutex> lk(*g_pool_lock);
+        strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
+    } else {
+        strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
+    }
     t->rows_at = Clock::now();
     t->cpu_ms += std::chrono::duration<double, std::milli>(t->rows_at - a).count();
     ++t->calls;
@@ -2202,8 +2210,22 @@ int main(int argc, char** argv) {
     // where the host loop and the pool's workers run, moved off the processors that take interrupts as generation
     // goes (drive_window); with a second GPU, whose work raises most of them, the first core starts free
     strata::kernels::cpu::CorePlacement placement(/*spare_first=*/o.second_gpu >= 0);
-    strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker,
-                                          placement.workers());
+    // STRATA_DSPLIT_PAIR=1 (--decode-split, a test of two requests in flight): two pools on disjoint cores, one for each
+    // stage's host thread, the first on the first half of the workers' processors
+    const bool pair_mode = std::getenv("STRATA_DSPLIT_PAIR") != nullptr && o.decode_split > 0;
+    const bool one_pool = pair_mode && std::getenv("STRATA_DSPLIT_ONEPOOL") != nullptr;
+    std::vector<int> cores_a = placement.workers(), cores_b;
+    if (pair_mode && !one_pool) {
+        cores_b.assign(cores_a.begin() + (ptrdiff_t) (cores_a.size() / 2), cores_a.end());
+        cores_a.resize(cores_a.size() / 2);
+    }
+    strata::kernels::cpu::ExpertPool pool(pair_mode && !one_pool ? (int) cores_a.size() : o.pool_workers, /*pin=*/true,
+                                          /*host_works=*/!o.no_host_worker, cores_a);
+    std::unique_ptr<strata::kernels::cpu::ExpertPool> pool_b;
+    if (pair_mode && !one_pool)
+        pool_b = std::make_unique<strata::kernels::cpu::ExpertPool>((int) cores_b.size(), true, !o.no_host_worker, cores_b);
+    static std::mutex pool_lock;
+    if (one_pool) g_pool_lock = &pool_lock;
     if (o.no_ple_prefetch) strata::kernels::ple_prefetch_enable(false);
     std::fprintf(stderr, "strata generate: session is up; locating the head\n");
     const strata::core::WeightRef* wo = wt.find("output.weight");
@@ -5373,6 +5395,264 @@ int main(int argc, char** argv) {
             mtp.on_draft = [&](int j, int32_t tok, float prob) {   // the drafts the next window will verify
                 if (lk == 0 && prob >= (float) o.spec_min_p) ver.ple_ahead(j + 1, tok);
             };
+        // ---- STRATA_DSPLIT_PAIR=1 (a test of two requests in flight, --decode-split): a second request starts from
+        // this prompt's state (its own sessions on both GPUs, its own drafter on the shared weights, sampled at 0.7);
+        // the first stage's windows run on this thread with the first pool, the second stage's on another with the
+        // second pool, so one request's second stage runs while the other's first stage does
+        if (pair_mode && ver2 != nullptr && use_mtp) {
+            std::string e;
+            // the second request's sessions: the main GPU's (its layers before the split, and the PLE), the second's
+            void* sbuf1 = nullptr;
+            strata::core::SessionState ss1;
+            if (cudaMalloc(&sbuf1, strata::core::session_bytes(g, o.max_context, K)) != cudaSuccess ||
+                strata::core::session_init(g, o.max_context, K, sbuf1, ss1) == 0) {
+                std::fprintf(stderr, "strata generate: pair: the second session does not fit\n");
+                return 1;
+            }
+            strata::core::session_zero(ss1, g, nullptr, main_cs);
+            ss1.ple = ss.ple;
+            ss1.ple.token = &ss1.ple_token;
+            ss1.ple.prev = ss1.ple_prev;
+            ss1.ple.hist = ss1.ple_hist;
+            strata::core::SessionState ss2b;
+            std::vector<strata::core::QsaState> qsa2b;
+            void* mem2b = nullptr;
+            if (!dsplit.make_session(ss2b, qsa2b, mem2b, e) ||
+                !strata::core::session_copy_layers(ss, ss1, g, p, 0, dsplit.at(), 0, main_cs)) {
+                std::fprintf(stderr, "strata generate: pair: %s\n", e.empty() ? "copying the first session" : e.c_str());
+                return 1;
+            }
+            cudaSetDevice(dsplit.device());
+            const bool c2 = strata::core::session_copy_layers(dsplit.session(), ss2b, g, p, dsplit.at(), g.n_layers,
+                                                              dsplit.at(), nullptr);
+            cudaSetDevice(o.main_gpu);
+            if (!c2) { std::fprintf(stderr, "strata generate: pair: copying the second session\n"); return 1; }
+            // its windows
+            strata::core::Verifier a1, b1;
+            a1.set_layers(0, dsplit.at());
+            a1.set_host_rows(true);
+            if (!a1.init(wt, g, ss1, vh, &native_head, W, e)) { std::fprintf(stderr, "strata generate: pair: %s\n", e.c_str()); return 1; }
+            a1.set_pcie_share(false);
+            {
+                strata::core::VerifyHits vh2;
+                vh2.res = host_res2.data();
+                vh2.cache_base = gpu2.cache().device_slot(0);
+                vh2.slot_off = gpu2.cache().slot_offsets();
+                vh2.slots = gpu2.cache().slots();
+                vh2.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+                cudaSetDevice(dsplit.device());
+                b1.set_layers(dsplit.at(), g.n_layers);
+                b1.set_input_rows(a1.final_R_host());
+                b1.set_host_rows(true);
+                b1.set_pcie_share(false);
+                const bool okb = b1.init(dsplit.weights(), g, ss2b, vh2, &dsplit.head(), W, e);
+                strata::kernels::SamplerParams sp;
+                sp.greedy = false;
+                sp.temperature = 0.7f;
+                sp.top_p = 0.95f;
+                sp.top_k = 20;
+                sp.seed = 1;
+                b1.set_sampling(sp);
+                cudaSetDevice(o.main_gpu);
+                if (!okb) { std::fprintf(stderr, "strata generate: pair: %s\n", e.c_str()); return 1; }
+            }
+            // its drafter: the weights shared, the draft K/V of the prompt copied
+            strata::core::MtpDrafter mtp1;
+            if (!mtp1.load_shared(mtp, ss1, W, e) || !mtp1.bind(wt, &native_head, a1.final_R_all(), e) ||
+                !strata::core::qsa_copy_cells(mtp.kv_state(), mtp1.kv_state(), g, p, main_cs) ||
+                cudaStreamSynchronize(main_stream) != cudaSuccess) {
+                std::fprintf(stderr, "strata generate: pair: the second drafter: %s\n", e.c_str());
+                return 1;
+            }
+            mtp.on_draft = nullptr;   // the PLE's reads ahead are this thread's (the table is not shared)
+            mtp1.on_draft = nullptr;
+            // the second stage's pool
+            Drive db;
+            db.d = drive.d;
+            db.d.pool = pool_b != nullptr ? pool_b.get() : &pool;
+            db.ring_us = drive.ring_us;
+            db.n_layers = drive.n_layers;
+            drive.placement = nullptr;   // its moves would put a worker on the other pool's cores
+            struct PairSeq {
+                strata::core::Verifier *A, *B;
+                strata::core::MtpDrafter* m;
+                int64_t p;
+                int32_t x;
+                bool first;
+                std::vector<int32_t> window, outv, drafts;
+                std::vector<float> dprob;
+                int T = 1;
+                int64_t produced = 0, rounds = 0, drafted = 0, accepted = 0;
+                bool done = false;
+                std::atomic<int> phase{0};   // 0: its next window's first stage, 1: its second stage, 2: done
+            };
+            PairSeq q[2] = {{&ver, ver2, &mtp, p, x, first_window, std::vector<int32_t>((size_t) W),
+                             std::vector<int32_t>((size_t) W), drafts, dprob},
+                            {&a1, &b1, &mtp1, p, x, first_window, std::vector<int32_t>((size_t) W),
+                             std::vector<int32_t>((size_t) W), drafts, dprob}};
+            std::mutex mu;
+            std::condition_variable cv;
+            std::deque<int> todo, fin;   // second stages to run; windows to commit and draft from
+            std::atomic<bool> failed{false};
+            std::string fail;
+            const int dev2 = dsplit.device();
+            double ms_a = 0, ms_idle1 = 0, ms_b = 0, ms_commit = 0, ms_draft = 0, ms_idle2 = 0;   // where each thread's time goes
+            const auto t0 = Clock::now();
+            std::thread second([&] {
+                (void) strata::kernels::cpu::pin_current_thread(0);
+                cudaSetDevice(o.main_gpu);
+                std::string e2;
+                for (;;) {
+                    int i = -1;
+                    const auto w0 = Clock::now();
+                    {
+                        std::unique_lock<std::mutex> lk(mu);
+                        cv.wait(lk, [&] { return failed || !todo.empty() || (q[0].done && q[1].done); });
+                        ms_idle2 += std::chrono::duration<double, std::milli>(Clock::now() - w0).count();
+                        if (failed || todo.empty()) return;
+                        i = todo.front();
+                        todo.pop_front();
+                    }
+                    PairSeq& r = q[i];
+                    drive_window(&db, r.T);
+                    db.d.layers = 0;
+                    db.d.experts = 0;
+                    db.d.failed = false;
+                    db.d.plan = r.B->plan_sink();
+                    db.d.host_res = r.B->residency();
+                    cudaSetDevice(dev2);
+                    const auto b0 = Clock::now();
+                    bool ok = r.B->run(r.T, r.window.data(), r.p, &drive_pool_multi, &db, r.outv.data(), e2) && !db.d.failed;
+                    ms_b += std::chrono::duration<double, std::milli>(Clock::now() - b0).count();
+                    cudaSetDevice(o.main_gpu);
+                    ok = ok && cudaMemcpy((void*) r.A->final_R_all(), r.B->final_R_host(),
+                                          (size_t) r.T * (size_t) (g.hc * g.n_embd) * sizeof(float),
+                                          cudaMemcpyHostToDevice) == cudaSuccess;
+                    {   // the commits and the next drafts go to the first thread, which has the time
+                        std::lock_guard<std::mutex> lk(mu);
+                        if (!ok) { failed = true; fail = e2.empty() ? "a second stage failed" : e2; }
+                        else fin.push_back(i);
+                    }
+                    cv.notify_all();
+                }
+            });
+            std::string e1;
+            for (;;) {
+                int i = -1, f = -1;
+                const auto w1 = Clock::now();
+                {
+                    std::unique_lock<std::mutex> lk(mu);
+                    cv.wait(lk, [&] { return failed || (q[0].done && q[1].done) || !fin.empty() || q[0].phase == 0 ||
+                                             q[1].phase == 0; });
+                    ms_idle1 += std::chrono::duration<double, std::milli>(Clock::now() - w1).count();
+                    if (failed || (q[0].done && q[1].done)) break;
+                    if (!fin.empty()) {
+                        f = fin.front();
+                        fin.pop_front();
+                    }
+                }
+                if (f >= 0) {   // a window's second stage is done: its commits and the next drafts
+                    PairSeq& r = q[f];
+                    std::string& e2 = e1;
+                    bool ok = true;
+                    const auto c0 = Clock::now();
+                    int a = 0;
+                    while (a < r.T - 1 && r.window[(size_t) a + 1] == r.outv[(size_t) a]) ++a;
+                    ok = ok && r.A->commit(a + 1, e2, true);
+                    cudaSetDevice(dev2);
+                    ok = ok && r.B->commit(a + 1, e2, true);
+                    cudaSetDevice(o.main_gpu);
+                    ms_commit += std::chrono::duration<double, std::milli>(Clock::now() - c0).count();
+                    ++r.rounds;
+                    r.drafted += r.T - 1;
+                    r.accepted += a;
+                    for (int k = 0; k <= a && r.produced < max_new; ++k) {
+                        ++r.produced;
+                        if (o.stop_eos && std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) r.outv[(size_t) k]) !=
+                                              o.eos_ids.end()) r.produced = max_new;
+                    }
+                    r.done = r.produced >= max_new;
+                    if (ok && !r.done) {
+                        const auto d0 = Clock::now();
+                        r.m->set_max_drafts(o.spec - 1);
+                        ok = r.m->draft(r.T, r.outv.data(), r.p, a, r.drafts.data(), e2, r.dprob.data(), (float) o.spec_min_p);
+                        ms_draft += std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+                    }
+                    r.x = r.outv[(size_t) a];
+                    r.p += a + 1;
+                    r.first = false;
+                    {
+                        std::lock_guard<std::mutex> lk(mu);
+                        if (!ok) { failed = true; fail = e2.empty() ? "a commit or a draft failed" : e2; }
+                        r.phase = r.done ? 2 : 0;
+                    }
+                    cv.notify_all();
+                    continue;
+                }
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (q[0].phase != 0 && q[1].phase != 0) continue;
+                    // the request that has waited longest: the other one's turn after this one's
+                    i = q[0].phase == 0 && (q[1].phase != 0 || q[0].rounds <= q[1].rounds) ? 0 : 1;
+                    q[i].phase = 1;
+                }
+                PairSeq& r = q[i];
+                int T = o.spec;
+                if (o.spec_min_p > 0.0) {
+                    T = 1;
+                    while (T < o.spec && r.dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;
+                }
+                if (r.first) T = 1;
+                T = (int) std::min<int64_t>(T, o.max_context - r.p);
+                r.T = T;
+                r.window[0] = r.x;
+                for (int k = 1; k < T; ++k) r.window[(size_t) k] = r.drafts[(size_t) k - 1];
+                drive_window(&drive, T);
+                drive.d.layers = 0;
+                drive.d.experts = 0;
+                drive.d.failed = false;
+                drive.d.plan = r.A->plan_sink();
+                drive.d.host_res = r.A->residency();
+                const auto a0 = Clock::now();
+                const bool ok = r.A->run(T, r.window.data(), r.p, &drive_pool_multi, &drive, r.outv.data(), e1) &&
+                                !drive.d.failed;
+                ms_a += std::chrono::duration<double, std::milli>(Clock::now() - a0).count();
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (!ok) { failed = true; fail = e1.empty() ? "a first stage failed" : e1; }
+                    else todo.push_back(i);
+                }
+                cv.notify_all();
+            }
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                if (!(q[0].done && q[1].done)) failed = true;
+            }
+            cv.notify_all();
+            second.join();
+            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            if (!fail.empty()) { std::fprintf(stderr, "strata generate: pair: %s\n", fail.c_str()); return 1; }
+            for (int i = 0; i < 2; ++i)
+                std::printf("%-24s %lld tokens in %lld rounds, drafts accepted %lld of %lld\n",
+                            i == 0 ? "pair request 0 (greedy)" : "pair request 1 (t 0.7)", (long long) q[i].produced,
+                            (long long) q[i].rounds, (long long) q[i].accepted, (long long) q[i].drafted);
+            if (o.window_profile) {
+                std::printf("-- the first request's first stage\n");
+                ver.print_profile();
+                std::printf("-- its second stage\n");
+                ver2->print_profile();
+            }
+            std::printf("%-24s first stage %.0f ms, idle %.0f | second stage %.0f, commits %.0f, drafts %.0f, idle %.0f\n",
+                        "pair threads", ms_a, ms_idle1, ms_b, ms_commit, ms_draft, ms_idle2);
+            std::printf("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s in all\n", "pair decode",
+                        (long long) (q[0].produced + q[1].produced), ms,
+                        (double) (q[0].produced + q[1].produced) * 1000.0 / ms);
+            cudaSetDevice(dsplit.device());
+            cudaFree(mem2b);
+            cudaSetDevice(o.main_gpu);
+            cudaFree(sbuf1);
+            return 0;
+        }
         while ((int64_t) produced.size() < max_new) {
             const Clock::time_point t0 = Clock::now();
             int T = o.spec;

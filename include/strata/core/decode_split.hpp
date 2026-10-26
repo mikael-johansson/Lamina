@@ -52,6 +52,9 @@ public:
     bool copy_out(int64_t c0, int64_t c1, std::string& err);
     /// The prompt cache's part (core/prompt_cache.hpp): the layers here of a checkpoint at `pos` to or from `host`, and
     /// a fresh sequence's zeroed state.
+    /// Another session of the layers here (a second request's), on this GPU and zeroed; `mem` its device memory, freed
+    /// by the caller (cudaFree, this GPU current).
+    bool make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err);
     bool save(int64_t pos, void* host);
     bool load(int64_t pos, const void* host);
     void zero();

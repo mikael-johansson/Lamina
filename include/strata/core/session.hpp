@@ -109,6 +109,13 @@ bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, con
 /// are indexed from `first` (the decode split's second session, core/decode_split.hpp).
 bool session_ckpt_load_layers(SessionState& s, const ModelGeometry& g, int64_t pos, const void* host, void* stream,
                               int64_t lo, int64_t hi, int64_t first);
+/// Copies one QSA state's cells [0, cells) (and its indexer's state, when it has one) into another of the same layout
+/// on the same device (a second request's session starting from the first's prompt).
+bool qsa_copy_cells(const QsaState& from, QsaState& to, const ModelGeometry& g, int64_t cells, void* stream);
+/// The same for a session's layers [lo, hi) at `cells`: their GDN states, QSA cells and indexers, the PLE's history and
+/// token window when layer 1 is among them; both sessions' states indexed from `first`.  Synchronous.
+bool session_copy_layers(const SessionState& from, SessionState& to, const ModelGeometry& g, int64_t cells, int64_t lo,
+                         int64_t hi, int64_t first, void* stream);
 /// After a failed copy of a checkpoint or of K/V cells: waits for the copies queued before it and clears the
 /// runtime's error, which the next launch check would otherwise take for its own and end the engine (the caller
 /// falls back: no checkpoint, no stash, or the prompt read again).  Returns false.

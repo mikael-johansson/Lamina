@@ -187,6 +187,33 @@ bool DecodeSplit::copy_state(int64_t c0, int64_t c1, bool in, std::string& err) 
 
 bool DecodeSplit::copy_in(int64_t cells, std::string& err) { return copy_state(0, cells, true, err); }
 
+bool DecodeSplit::make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err) {
+    const ModelGeometry& g = *g_;
+    const int64_t cells = ss_->qsa_states[0].max_cells;
+    uint64_t sbytes = up((uint64_t) gdn_count_ * gdn_state_floats(g) * 4);
+    for (size_t i = 0; i < qsa_main_.size(); ++i) sbytes += up(qsa_state_prompt_bytes(g, cells, 0, true, qsa_kv_format()));
+    OnDevice on(dev_);
+    if (cudaMalloc(&mem, (size_t) sbytes) != cudaSuccess) {
+        err = "--decode-split: another session (" + std::to_string(sbytes >> 20) + " MiB) does not fit";
+        return false;
+    }
+    uint8_t* p = (uint8_t*) mem;
+    out = SessionState{};
+    out.gdn_state = (float*) p;
+    cudaMemset(p, 0, (size_t) gdn_count_ * gdn_state_floats(g) * 4);
+    p += up((uint64_t) gdn_count_ * gdn_state_floats(g) * 4);
+    qsa.assign(qsa_main_.size(), QsaState{});
+    for (QsaState& q : qsa) {
+        const uint64_t n = qsa_state_prompt_init(g, cells, 0, true, qsa_kv_format(), p, q, nullptr);
+        if (n == 0) { err = "--decode-split: another session's K/V"; return false; }
+        p += up(n);
+    }
+    out.qsa_states = qsa.data();
+    out.k = ss2_.k;
+    out.max_cells = ss2_.max_cells;
+    return cudaDeviceSynchronize() == cudaSuccess;
+}
+
 bool DecodeSplit::save(int64_t pos, void* host) {
     OnDevice on(dev_);
     return session_ckpt_save_layers(ss2_, *g_, pos, host, nullptr, at_, g_->n_layers, at_);

@@ -1,6 +1,7 @@
 // src/core/session.cpp - one token through all 48 layers.  See the header for why the graphs are per-layer.
 #include "strata/core/session.hpp"
 #include "strata/core/progress.hpp"
+#include "strata/core/layout.hpp"
 
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/elementwise.hpp"
@@ -11,6 +12,8 @@
 #include "strata/kernels/ngram.hpp"
 
 #include <cuda_runtime.h>
+
+#include <algorithm>
 
 #include <atomic>
 #include <chrono>
@@ -239,6 +242,59 @@ bool session_ckpt_load_layers(SessionState& s, const ModelGeometry& g, int64_t p
         s.ple_prev[0] = ints[0];
         s.ple_prev[1] = ints[1];
         s.ple_token = ints[2];
+    }
+    return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
+}
+
+bool qsa_copy_cells(const QsaState& from, QsaState& to, const ModelGeometry& g, int64_t cells, void* stream) {
+    cudaStream_t cs = (cudaStream_t) stream;
+    const strata::kernels::QsaShapes sh = qsa_shapes(g);
+    const auto af = qsa_kv_arrays(from, g), at = qsa_kv_arrays(to, g);
+    if (af.size() != at.size()) return false;
+    const int64_t pages = std::min<int64_t>((cells + sh.page_size - 1) / sh.page_size, std::min(from.n_pages, to.n_pages));
+    for (size_t k = 0; k < af.size(); ++k) {
+        const uint64_t page = (uint64_t) sh.n_head_kv * (uint64_t) sh.page_size * af[k].row_bytes;
+        if (cudaMemcpyAsync(at[k].data, af[k].data, (size_t) ((uint64_t) pages * page), cudaMemcpyDeviceToDevice, cs) !=
+            cudaSuccess)
+            return session_copy_failed(stream);
+    }
+    if (from.idx_tail != nullptr && to.idx_tail != nullptr) {
+        const uint64_t row = (uint64_t) sh.idx_dim * 4;
+        const int64_t rows = std::min<int64_t>(cells / sh.idx_block + 2, std::min(from.max_cells, to.max_cells) / sh.idx_block + 2);
+        const struct { void* d; const void* s; uint64_t n; } parts[4] = {
+            {to.idx_tail, from.idx_tail, (uint64_t) (sh.idx_block - 1) * row},
+            {to.idx_dead, from.idx_dead, row},
+            {to.idx_pooled, from.idx_pooled, (uint64_t) rows * row},
+            {to.idx_block_pos, from.idx_block_pos, 4}};
+        for (const auto& p : parts)
+            if (cudaMemcpyAsync(p.d, p.s, (size_t) p.n, cudaMemcpyDeviceToDevice, cs) != cudaSuccess)
+                return session_copy_failed(stream);
+    }
+    return true;
+}
+
+bool session_copy_layers(const SessionState& from, SessionState& to, const ModelGeometry& g, int64_t cells, int64_t lo,
+                         int64_t hi, int64_t first, void* stream) {
+    cudaStream_t cs = (cudaStream_t) stream;
+    const uint64_t gdn = (uint64_t) gdn_state_floats(g) * 4;
+    for (int64_t l = first, gi = 0, qi = 0; l < g.n_layers; ++l) {
+        const bool qsa = is_qsa_layer(g, l);
+        if (l >= lo && l < hi) {
+            if (qsa ? !qsa_copy_cells(from.qsa_states[qi], to.qsa_states[qi], g, cells, stream)
+                    : cudaMemcpyAsync((uint8_t*) to.gdn_state + (uint64_t) gi * gdn,
+                                      (const uint8_t*) from.gdn_state + (uint64_t) gi * gdn, (size_t) gdn,
+                                      cudaMemcpyDeviceToDevice, cs) != cudaSuccess)
+                return session_copy_failed(stream);
+        }
+        ++(qsa ? qi : gi);
+    }
+    if (lo <= 1 && hi > 1 && from.ple_hist != nullptr && to.ple_hist != nullptr) {
+        if (cudaMemcpyAsync(to.ple_hist, from.ple_hist, (size_t) ple_hist_bytes(), cudaMemcpyDeviceToDevice, cs) !=
+            cudaSuccess)
+            return session_copy_failed(stream);
+        to.ple_prev[0] = from.ple_prev[0];
+        to.ple_prev[1] = from.ple_prev[1];
+        to.ple_token = from.ple_token;
     }
     return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
 }
