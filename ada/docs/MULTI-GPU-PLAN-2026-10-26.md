@@ -172,3 +172,11 @@ main session's QSA pools of the later layers are frozen, and with batch slots un
 an unmapped address (the driver takes it for host memory).  Restore now loads the layers `checkpoint()` saved.
 Without `--batch` it only copied unused state.  The `pf-split-batch` prefill run had three of these crashes
 (opencode-30k, cc-40k, cc-80k-next): its numbers for those requests are a restart's, not the split's.
+
+### `--spec 5` on the split (C=1, the corpus through the server, after the fix)
+
+Geometric mean over the 8 requests: spec 4 224.6 / 224.6 tok/s (two rounds), spec 5 225.7 / 225.6: +0.5%, noise.
+Per request -6% to +8%, partly because the outputs differ (a different window size verifies other drafts).  The
+direct code prompt (same tokens): spec 4 225.1 / 224.3, spec 5 219.5 / 220.4 (-2%); spec 5 accepts all 4 drafts in
+83 of 159 windows, but a 5-token window costs more.  Kept spec 4.  One more spec-4 round (not counted, its outputs
+also differ) came out at 202.6: one server start in a few decodes ~10% slower, worth watching.
