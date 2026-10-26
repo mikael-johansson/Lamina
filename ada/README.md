@@ -7,7 +7,8 @@ Qwen3.8-Flash-Next (512-expert MoE, 10 active) served by the eddoursul fork of S
   the variables set the engine behaves exactly like `custom`.
 - commit 2: this `ada/` directory: configs, start script, benchmark tools, results and reports.
 
-Production runs the binary built from `custom` (`eddoursul/build/strata`); nothing here is needed to run it.
+Production runs `custom` plus the `--arena-place` fix below (`eddoursul/build/strata`; the plain `custom` build is
+`build/strata.orig`).
 
 ## Machine
 
@@ -95,9 +96,16 @@ One verify window (~4 tokens checked at once, short context) is ~15.7 ms
 | waiting for the second card | 0.3 (3.9 with prefetch on) |
 | other | ~1 |
 
-- The CPU's misses: ~1.6 missed experts per layer at 98-99% hit, computed by 6 pool workers at ~24 GB/s, which
-  is the RAM's speed (3 sticks: part of the address space is likely single-channel). Not the cores, not PCIe.
-  At 94-95% hit (agent traffic) there are ~3x as many, so this share grows; the 4th stick is the cheapest lever.
+- The CPU's misses: ~1.6 missed experts per layer at 98-99% hit, computed by 6 pool workers, limited by RAM
+  reads (not the cores, not PCIe). At 94-95% hit (agent traffic) there are ~3x as many, so this share grows.
+- RAM layout (measured with `bench/membw`, root, by physical address): with 3 sticks, physical 0-32 GiB is
+  single-channel (~22 GB/s on 8 cores) and 32-96 GiB dual-channel (~36 GB/s). `--arena-place` is meant to put
+  the CPU's experts in the fast places, but it timed them on one core (the pool's host thread was already
+  pinned), where both regions read ~25 GB/s, so it could not tell them apart. Fixed on this branch (it times on
+  all cores, `src/core/arena_place.cpp`): it now finds ~10K slow places (~20 GiB) and moves the ~2,900 CPU experts
+  that were in them (42%) out. Decode +3% on average (ABAB runs `bench/results/ram-*`, 13 of 16 requests faster;
+  150K context +7-8%). With the CPU's experts already in dual-channel RAM, a 4th stick adds capacity more than
+  decode speed for IQ3_S.
 - The main card's own work (~11 ms) is neither compute- nor clearly bandwidth-bound. Estimate from the weight
   sizes: each window reads ~2.9 GB of dense weights (projections 2.0 GB, hyper-connections 0.64 GB, its part of
   the head ~0.3 GB) plus ~1.5-2 GB of resident experts, i.e. ~400-450 GB/s, about half of the 3090's 936 GB/s.
@@ -119,7 +127,7 @@ prefill needs faster kernels or a third card.
 
 ## What was tried
 
-Kept: prefetch 0, split 28 (IQ3_S), VRAM reserve 512 MiB, CPU vision.
+Kept: prefetch 0, split 28 (IQ3_S), VRAM reserve 512 MiB, CPU vision, `--arena-place` timed on all cores.
 
 Not kept (repeated A/B, within noise or worse): `--spec 5`, `--spec-min-p 0.4`, fused pool phases
 (`STRATA_POOL_FUSED=1`, +1.6%), pool workers 5/7, adaptive decay 0.5/0.9, 192 swaps, a static second tier,
@@ -134,7 +142,7 @@ Upstream (niko1221) on this box loses at every concurrency: single stream ~45% s
 
 | idea | expected | cost |
 | --- | --- | --- |
-| 4th RAM stick | faster CPU misses; most at agent traffic's 94-96% hit | hardware |
+| 4th RAM stick | 32 GB more room (Q4, more at once); little decode gain for IQ3_S since the arena fix | hardware |
 | batching in the fork (C>=2) | C=2 ~1.35x total short / ~1.2x at 40K; C=4 ~1.65x / ~1.35x | several days of engine work |
 | TP=2 | C=1 +25-35% (estimate; P2P works, 11-21 us one-way pushes) | weeks |
 | 3rd card for Q4 | Q4 is CPU-miss-bound on 2 cards | hardware |
@@ -148,7 +156,8 @@ on vLLM because rows rarely share experts (~1.4 rows per distinct expert per win
 - `strata.sh`: start/stop/status; `smoke.py`: first smoke test.
 - `bench/bench.py`: real recorded requests through the server (`corpus.json`); `bench/load.py`: C concurrent
   clients; `bench/concurrency.sh`: fork vs upstream matrix; `bench/trace_run.py` + `bench/route_analysis.py`:
-  expert-routing traces and the batching simulation; `bench/extract_requests.py`: builds the request index from
+  expert-routing traces and the batching simulation; `bench/membw.c`: RAM read speed per physical GiB (root);
+  `bench/ram_offline.sh`: takes a physical range out of use (memory hotplug); `bench/extract_requests.py`: builds the request index from
   the vLLM logs (only request bodies).
 - `bench/results/<run>/`: `results.json` / `load.json` of every run (server logs and config copies left out).
 - `docs/`: the overnight report, the running plan (`PLAN.md`), the first 2x3090 analysis.

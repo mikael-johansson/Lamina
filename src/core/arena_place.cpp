@@ -24,6 +24,12 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#endif
+
 namespace strata::core {
 
 namespace {
@@ -37,8 +43,23 @@ std::atomic<uint64_t> g_sink{0};   // the reads' results, so that they happen
 class Crew {
 public:
     Crew() {
+#if !defined(_WIN32)
+        // The caller is the pool's host thread, already pinned to one processor: physical_cores() would see that
+        // one, and a one-core read cannot tell a single channel from two (~25 GB/s on both on a 5700X with three
+        // DIMMs, ~22 against ~36 with 8 cores).  Look at every online processor, then give the mask back.
+        cpu_set_t was, all;
+        const bool widened = pthread_getaffinity_np(pthread_self(), sizeof was, &was) == 0;
+        if (widened) {
+            CPU_ZERO(&all);
+            for (int i = 0, n = (int) sysconf(_SC_NPROCESSORS_ONLN); i < n && i < CPU_SETSIZE; ++i) CPU_SET(i, &all);
+            pthread_setaffinity_np(pthread_self(), sizeof all, &all);
+        }
+#endif
         for (const auto& core : strata::kernels::cpu::physical_cores())
             if (!core.empty()) cpus_.push_back(core.front());
+#if !defined(_WIN32)
+        if (widened) pthread_setaffinity_np(pthread_self(), sizeof was, &was);
+#endif
         if (cpus_.empty()) cpus_.push_back(-1);
         std::rotate(cpus_.begin(), cpus_.end() - 1, cpus_.end());
         n_ = (int) cpus_.size();
