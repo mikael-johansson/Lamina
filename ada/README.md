@@ -157,7 +157,7 @@ Upstream (niko1221) on this box loses at every concurrency: single stream ~45% s
 | idea | expected | cost |
 | --- | --- | --- |
 | 5900X/5950X | gate/up is compute-bound: rough C=1 +8..+20% | hardware |
-| CPU overclock (PBO/CO) | +1.5-3% decode | BIOS |
+| CPU PBO (PPT 76 -> ~120 W) | the pool is power-bound (77 W at 4.0 GHz all-core, 4.65 one core): ~+5-8% at C=2-4, ~+1% C=1 | BIOS |
 | VRAM headroom | ~1 GB unused (551 MiB main with the default 700 MiB reserve, 427 MiB second): ~500 more experts | `--vram-reserve-mib`, test |
 | 4th RAM stick | 32 GB more room (Q4, more at once); no decode gain expected for IQ3_S (the pool is not RAM-bound) | hardware |
 | **3rd card + decode layer split in the fork** | C=1 ~+30-35% (all of IQ3_S in VRAM) | hardware + ~1 week |
