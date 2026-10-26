@@ -1002,27 +1002,32 @@ struct SlotLoan {
     int main_device = 0;
     int32_t first = -1;         // the first lent slot, -1 when the cache cannot spare the bytes
     int64_t keep = 0;           // the slots [0, keep) are never lent (experts only in VRAM, --vram-pin-gib)
+    int64_t end = -1;           // the slots lent end below this one (-1: the cache's end; a batch slot's loan)
     std::vector<std::pair<int32_t, int32_t>> lent;   // (residency index, slot) while lent
 
+    int64_t top() const { return end >= 0 ? end : cache->slots(); }
     uint64_t offset(int64_t slot) const {
+        if (slot >= cache->slots()) return (uint64_t) cache->bytes();
         return cache->slot_offsets() ? cache->slot_offsets()[slot]
                                      : (uint64_t) slot * (uint64_t) (cache->bytes() / cache->slots());
     }
-    /// The last slots that hold `need` bytes; false when the cache cannot spare them.
+    /// The last slots below `top()` that hold `need` bytes; false when the cache cannot spare them.
     bool plan(uint64_t need) {
+        const int64_t t = top();
         int64_t k = 0;
-        while (k < cache->slots() && (uint64_t) cache->bytes() - offset(cache->slots() - k) < need) ++k;
-        first = k + 128 <= cache->slots() && cache->slots() - k >= keep ? (int32_t) (cache->slots() - k) : -1;
+        while (k < t && offset(t) - offset(t - k) < need) ++k;
+        first = k + 128 <= t && t - k >= keep ? (int32_t) (t - k) : -1;
         return first >= 0;
     }
     void* base() const { return first >= 0 ? (void*) cache->device_slot(first) : nullptr; }
-    uint64_t bytes() const { return first >= 0 ? (uint64_t) cache->bytes() - offset(first) : 0; }
-    int64_t slots() const { return first >= 0 ? cache->slots() - first : 0; }
+    uint64_t bytes() const { return first >= 0 ? offset(top()) - offset(first) : 0; }
+    int64_t slots() const { return first >= 0 ? top() - first : 0; }
     void lend() {
         if (first < 0) return;
         std::vector<int32_t>& r = *res;
+        const int64_t t = top();
         for (size_t i = 0; i < r.size(); ++i)
-            if (r[i] >= first) {
+            if (r[i] >= first && r[i] < t) {
                 lent.emplace_back((int32_t) i, r[i]);
                 r[i] = strata::core::kNotResident;
             }
@@ -4348,6 +4353,23 @@ int main(int argc, char** argv) {
         std::thread s_first, s_second;
         Drive sdA, sdB;                  // each stage's pool user (the solo path keeps `drive`)
         const int dev2 = ver2 != nullptr ? dsplit.device() : -1;
+        // each slot's sessions live in cache slots lent while it runs (SlotLoan): on the main GPU below the elastic
+        // K/V's room for the whole context under the prompt path's loan, on the second below its prompt path's loan;
+        // one region a slot, at fixed places (the windows' graphs bake them in), stacked downwards
+        std::vector<SlotLoan> sl1((size_t) n_slots), sl2((size_t) n_slots);
+        int64_t slot_end1 = -1, slot_end2 = -1;
+        // an ended slot's slots back to the experts (refilled from the arena): before a request, once nothing reads them
+        auto give_back_slots = [&](int except) {
+            for (int i = 0; i < n_slots; ++i) {
+                if (i == except || slots[(size_t) i]->active.load()) continue;
+                std::string e;
+                if (!sl1[(size_t) i].give_back(*srcp, g.n_expert, e) || !sl2[(size_t) i].give_back(*srcp, g.n_expert, e)) {
+                    std::fprintf(stderr, "strata serve: giving a batch slot's VRAM back: %s\n", e.c_str());
+                    return false;
+                }
+            }
+            return true;
+        };
         auto slot_fail = [&](const std::string& e) {
             std::lock_guard<std::mutex> lk(smu);
             if (s_err.empty()) s_err = e;
@@ -4520,22 +4542,74 @@ int main(int argc, char** argv) {
             scv.notify_all();
         };
         // a slot's sessions, windows and drafter, once (their addresses stay: the windows' graphs bake them in)
-        auto make_slot = [&](BatchSlot& b, std::string& e) -> bool {
-            if (b.made) return true;
+        // the slot's loans taken and its sessions laid out in them (zeroed: what the experts left there is not state)
+        auto lend_slot = [&](BatchSlot& b, std::string& e) -> bool {
             const int64_t L = dsplit.at();
-            b.cells = slot_cells;
-            const uint64_t b1 = strata::core::range_session_bytes(g, b.cells, 0, L);
-            if (cudaMalloc(&b.mem1, (size_t) b1) != cudaSuccess ||
-                !strata::core::make_range_session(g, b.cells, 0, L, K, b.mem1, b.ss1, b.q1)) {
-                e = "batch slot " + std::to_string(b.id) + ": its session (" + std::to_string(b1 >> 20) +
-                    " MiB) does not fit on the main GPU";
-                return false;
-            }
+            SlotLoan &l1 = sl1[(size_t) b.id], &l2 = sl2[(size_t) b.id];
+            if (l1.lent.empty()) l1.lend();
+            if (l2.lent.empty()) l2.lend();
+            const bool ok1 = strata::core::make_range_session(g, b.cells, 0, L, K, b.mem1, b.ss1, b.q1);
+            cudaSetDevice(dev2);
+            const bool ok2 = strata::core::make_range_session(g, b.cells, L, g.n_layers, K, b.mem2, b.ss2, b.q2);
+            cudaSetDevice(o.main_gpu);
+            if (!ok1 || !ok2) { e = "batch slot " + std::to_string(b.id) + ": its sessions"; return false; }
             b.ss1.ple = ss.ple;
             b.ss1.ple.token = &b.ss1.ple_token;
             b.ss1.ple.prev = b.ss1.ple_prev;
             b.ss1.ple.hist = b.ss1.ple_hist;
-            if (!dsplit.make_session(b.ss2, b.q2, b.mem2, e, b.cells)) return false;
+            return true;
+        };
+        auto make_slot = [&](BatchSlot& b, std::string& e) -> bool {
+            if (b.made) return lend_slot(b, e);
+            const int64_t L = dsplit.at();
+            b.cells = slot_cells;
+            const uint64_t b1 = strata::core::range_session_bytes(g, b.cells, 0, L);
+            const uint64_t b2 = strata::core::range_session_bytes(g, b.cells, L, g.n_layers);
+            if (slot_end1 < 0) {   // the regions' upper bounds, once
+                const bool off = o.second_gpu >= 0 && !o.no_prompt_offload;
+                SlotLoan top1;
+                top1.cache = &xcache;
+                top1.plan(worst_loan(off));
+                slot_end1 = top1.first >= 0 ? top1.first : xcache.slots();
+                if (kvg.on) {   // the whole context's K/V under the loan
+                    const uint64_t G = strata::core::vmm_granularity();
+                    const uint64_t kv = (uint64_t) strata::core::qsa_kv_elastic_need(o.max_context + 64) * G + G;
+                    slot_end1 = std::min<int64_t>(slot_end1, kvg.top);
+                    const uint64_t t = top1.offset(slot_end1);
+                    while (slot_end1 > (int64_t) pin1.size() && t - top1.offset(slot_end1) < kv) --slot_end1;
+                }
+                using strata::prefill::ExpertRunner;
+                const uint64_t need2 = ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) +
+                                       ExpertRunner::area_cap(o.prefill_chunk, true) +
+                                       psplit.bytes_for(o.prefill_chunk, o.max_context) + (256ull << 20);
+                SlotLoan top2;
+                top2.cache = &gpu2.cache();
+                top2.plan(need2);
+                slot_end2 = top2.first >= 0 ? top2.first : gpu2.cache().slots();
+            }
+            SlotLoan &l1 = sl1[(size_t) b.id], &l2 = sl2[(size_t) b.id];
+            l1.cache = &xcache;
+            l1.res = &host_res;
+            l1.d_res = d_res;
+            l1.device = l1.main_device = o.main_gpu;
+            l1.keep = (int64_t) pin1.size();
+            l1.end = slot_end1;
+            l2.cache = &gpu2.cache();
+            l2.res = &host_res2;
+            l2.device = dev2;
+            l2.main_device = o.main_gpu;
+            l2.keep = (int64_t) pin2.size();
+            l2.end = slot_end2;
+            if (!l1.plan(b1) || !l2.plan(b2)) {
+                e = "batch slot " + std::to_string(b.id) + ": the expert caches cannot lend its sessions' " +
+                    std::to_string((b1 + b2) >> 20) + " MiB (lower STRATA_SLOT_CELLS)";
+                return false;
+            }
+            slot_end1 = l1.first;   // the next slot's region goes below this one's
+            slot_end2 = l2.first;
+            b.mem1 = l1.base();
+            b.mem2 = l2.base();
+            if (!lend_slot(b, e)) return false;
             b.A.set_layers(0, L);
             b.A.set_host_rows(true);
             if (!b.A.init(wt, g, b.ss1, vh, &native_head, W, e)) return false;
@@ -4570,10 +4644,10 @@ int main(int argc, char** argv) {
             cudaSetDevice(dev2);
             cudaMemGetInfo(&f2, &t2);
             cudaSetDevice(o.main_gpu);
-            std::fprintf(stderr, "strata serve: batch slot %d made: %lld cells, %.0f MiB of sessions; %lld / %lld MiB left "
-                                 "free\n", b.id, (long long) b.cells,
-                         (double) (b1 + strata::core::range_session_bytes(g, b.cells, L, g.n_layers)) / 1048576.0,
-                         (long long) (f1 >> 20), (long long) (f2 >> 20));
+            std::fprintf(stderr, "strata serve: batch slot %d made: %lld cells, its sessions in %lld + %lld lent cache slots "
+                                 "(%.0f MiB, from slot %d / %d); %lld / %lld MiB left free\n", b.id, (long long) b.cells,
+                         (long long) l1.slots(), (long long) l2.slots(), (double) (b1 + b2) / 1048576.0, l1.first,
+                         l2.first, (long long) (f1 >> 20), (long long) (f2 >> 20));
             return true;
         };
         while ((resume_slots(), next_line(line))) {
@@ -4855,6 +4929,7 @@ int main(int argc, char** argv) {
                     tr("from batch slot", from->id, cells);
                     from->held.clear();
                 }
+                if (!give_back_slots(admit)) { report("giving a batch slot's VRAM back"); return 1; }
             }
             const int64_t reuse = pcache.begin(ids, req_imgs);
             tr("request", n, reuse);
