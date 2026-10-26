@@ -1,0 +1,224 @@
+{
+ "tag": "fork-iq3-final",
+ "config": "configs/fork-iq3_s-tuned.json",
+ "parallel": 1,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 2.3,
+   "total_tokens": 512,
+   "total_tps": 226.0,
+   "clients": [
+    {
+     "ttft_s": 0.12,
+     "tokens": 512,
+     "decode_tps": 238.6,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 1,
+   "wall_s": 2.3,
+   "total_tokens": 512,
+   "total_tps": 222.7,
+   "clients": [
+    {
+     "ttft_s": 0.08,
+     "tokens": 512,
+     "decode_tps": 230.4,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 0,
+   "wall_s": 4.6,
+   "total_tokens": 1024,
+   "total_tps": 220.6,
+   "clients": [
+    {
+     "ttft_s": 2.34,
+     "tokens": 512,
+     "decode_tps": 222.2,
+     "error": null
+    },
+    {
+     "ttft_s": 0.03,
+     "tokens": 512,
+     "decode_tps": 231.6,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 1,
+   "wall_s": 4.4,
+   "total_tokens": 958,
+   "total_tps": 217.2,
+   "clients": [
+    {
+     "ttft_s": 0.1,
+     "tokens": 446,
+     "decode_tps": 235.0,
+     "error": null
+    },
+    {
+     "ttft_s": 2.09,
+     "tokens": 512,
+     "decode_tps": 220.6,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 4,
+   "round": 0,
+   "wall_s": 9.3,
+   "total_tokens": 1982,
+   "total_tps": 212.6,
+   "clients": [
+    {
+     "ttft_s": 2.63,
+     "tokens": 512,
+     "decode_tps": 226.8,
+     "error": null
+    },
+    {
+     "ttft_s": 0.1,
+     "tokens": 512,
+     "decode_tps": 212.5,
+     "error": null
+    },
+    {
+     "ttft_s": 4.97,
+     "tokens": 446,
+     "decode_tps": 229.9,
+     "error": null
+    },
+    {
+     "ttft_s": 7.01,
+     "tokens": 512,
+     "decode_tps": 221.4,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 4,
+   "round": 1,
+   "wall_s": 7.7,
+   "total_tokens": 1633,
+   "total_tps": 212.6,
+   "clients": [
+    {
+     "ttft_s": 4.82,
+     "tokens": 512,
+     "decode_tps": 233.7,
+     "error": null
+    },
+    {
+     "ttft_s": 0.1,
+     "tokens": 512,
+     "decode_tps": 229.9,
+     "error": null
+    },
+    {
+     "ttft_s": 2.44,
+     "tokens": 512,
+     "decode_tps": 225.6,
+     "error": null
+    },
+    {
+     "ttft_s": 7.13,
+     "tokens": 97,
+     "decode_tps": 175.9,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "long",
+   "c": 1,
+   "round": 0,
+   "wall_s": 14.2,
+   "total_tokens": 256,
+   "total_tps": 18.1,
+   "clients": [
+    {
+     "ttft_s": 12.57,
+     "tokens": 256,
+     "decode_tps": 161.4,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "long",
+   "c": 2,
+   "round": 0,
+   "wall_s": 26.1,
+   "total_tokens": 512,
+   "total_tps": 19.6,
+   "clients": [
+    {
+     "ttft_s": 12.49,
+     "tokens": 256,
+     "decode_tps": 167.6,
+     "error": null
+    },
+    {
+     "ttft_s": 24.48,
+     "tokens": 256,
+     "decode_tps": 160.9,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "long",
+   "c": 4,
+   "round": 0,
+   "wall_s": 47.4,
+   "total_tokens": 1024,
+   "total_tps": 21.6,
+   "clients": [
+    {
+     "ttft_s": 45.97,
+     "tokens": 256,
+     "decode_tps": 172.8,
+     "error": null
+    },
+    {
+     "ttft_s": 10.69,
+     "tokens": 256,
+     "decode_tps": 168.3,
+     "error": null
+    },
+    {
+     "ttft_s": 22.46,
+     "tokens": 256,
+     "decode_tps": 179.3,
+     "error": null
+    },
+    {
+     "ttft_s": 34.29,
+     "tokens": 256,
+     "decode_tps": 176.3,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 26
+}

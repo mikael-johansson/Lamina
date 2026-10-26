@@ -1,0 +1,200 @@
+[
+ {
+  "file": "2026-10-23T16-37-40Z_chatcmpl-94a68b4bd34d4a34_SYSTEM_You_are_a_Claude_agent_built_on_Anthropic_s_Claude.log",
+  "path": "/v1/messages",
+  "agent": "claude-cli/2.1.309 (external, sdk-cli)",
+  "chars": 196425,
+  "tools": 12,
+  "msgs": 78,
+  "session": "d18bee77-c8e9-49da-b93b-3303894fc2fa",
+  "cancelled": false,
+  "group": "cc"
+ },
+ {
+  "file": "2026-10-23T15-29-55Z_chatcmpl-91051c229c6913b8_SYSTEM_You_are_a_Claude_agent_built_on_Anthropic_s_Claude.log",
+  "path": "/v1/messages",
+  "agent": "claude-cli/2.1.309 (external, sdk-cli)",
+  "chars": 190948,
+  "tools": 12,
+  "msgs": 57,
+  "session": "32f2515a-c601-42da-b844-9fa829c05015",
+  "cancelled": false,
+  "group": "cc"
+ },
+ {
+  "file": "2026-10-23T17-54-19Z_chatcmpl-93e320222b07c925_SYSTEM_You_are_a_Claude_agent_built_on_Anthropic_s_Claude.log",
+  "path": "/v1/messages",
+  "agent": "claude-cli/2.1.309 (external, sdk-cli)",
+  "chars": 84379,
+  "tools": 12,
+  "msgs": 12,
+  "session": "1d86ca15-29aa-4552-8dc9-4604f3dc6302",
+  "cancelled": false,
+  "group": "cc"
+ },
+ {
+  "file": "2026-10-22T15-02-25Z_chatcmpl-bee33766fbc78d67_SYSTEM_You_are_a_Claude_agent_built_on_Anthropic_s_Claude.log",
+  "path": "/v1/messages",
+  "agent": "claude-cli/2.1.308 (external, sdk-cli)",
+  "chars": 169046,
+  "tools": 12,
+  "msgs": 58,
+  "session": "afa79940-1709-4e7d-be8a-c6011a74b997",
+  "cancelled": false,
+  "group": "cc"
+ },
+ {
+  "file": "2026-10-23T14-43-32Z_chatcmpl-a2d6af4dfc4ca21e_SYSTEM_You_are_a_Claude_agent_built_on_Anthropic_s_Claude.log",
+  "path": "/v1/messages",
+  "agent": "claude-cli/2.1.309 (external, sdk-cli)",
+  "chars": 50875,
+  "tools": 12,
+  "msgs": 2,
+  "session": "cae74968-0038-4c4c-bf54-6047fc5cbdbf",
+  "cancelled": false,
+  "group": "cc"
+ },
+ {
+  "file": "2026-10-23T14-53-36Z_chatcmpl-8af7b8fb4434be65_SYSTEM_You_are_a_Claude_agent_built_on_Anthropic_s_Claude.log",
+  "path": "/v1/messages",
+  "agent": "claude-cli/2.1.309 (external, sdk-cli)",
+  "chars": 141375,
+  "tools": 12,
+  "msgs": 62,
+  "session": "dc3dbc20-9e28-4692-b8bc-8b45b5339729",
+  "cancelled": false,
+  "group": "cc"
+ },
+ {
+  "file": "2026-10-23T19-56-31Z_chatcmpl-a96df7695b65fce2_SYSTEM_You_are_opencode_an_interactive_CLI_tool_that_helps.log",
+  "path": "/v1/chat/completions",
+  "agent": "opencode/1.19.3 ai-sdk/provider-utils/4.",
+  "chars": 43662,
+  "tools": 9,
+  "msgs": 20,
+  "session": "",
+  "cancelled": false,
+  "group": "oc"
+ },
+ {
+  "file": "2026-10-23T18-10-28Z_chatcmpl-bb4bbcf5e8f9efcd_SYSTEM_You_are_opencode_an_interactive_CLI_tool_that_helps.log",
+  "path": "/v1/chat/completions",
+  "agent": "opencode/1.19.3 ai-sdk/provider-utils/4.",
+  "chars": 32509,
+  "tools": 9,
+  "msgs": 5,
+  "session": "",
+  "cancelled": false,
+  "group": "oc"
+ },
+ {
+  "file": "2026-10-23T18-41-50Z_chatcmpl-94621b98b4f7242e_SYSTEM_You_are_opencode_an_interactive_CLI_tool_that_helps.log",
+  "path": "/v1/chat/completions",
+  "agent": "opencode/1.19.3 ai-sdk/provider-utils/4.",
+  "chars": 49000,
+  "tools": 9,
+  "msgs": 12,
+  "session": "",
+  "cancelled": false,
+  "group": "oc"
+ },
+ {
+  "file": "2026-10-23T17-52-08Z_chatcmpl-af337a4da8fb0326_SYSTEM_You_are_opencode_an_interactive_CLI_tool_that_helps.log",
+  "path": "/v1/chat/completions",
+  "agent": "opencode/1.19.3 ai-sdk/provider-utils/4.",
+  "chars": 70735,
+  "tools": 9,
+  "msgs": 30,
+  "session": "",
+  "cancelled": false,
+  "group": "oc"
+ },
+ {
+  "file": "2026-10-23T16-09-05Z_chatcmpl-a10b42187194bbf7_SYSTEM_You_are_opencode_an_interactive_CLI_tool_that_helps.log",
+  "path": "/v1/chat/completions",
+  "agent": "opencode/1.19.3 ai-sdk/provider-utils/4.",
+  "chars": 45421,
+  "tools": 9,
+  "msgs": 20,
+  "session": "",
+  "cancelled": false,
+  "group": "oc"
+ },
+ {
+  "file": "2026-10-23T19-51-11Z_chatcmpl-b042f4c7276deb77_SYSTEM_You_are_opencode_an_interactive_CLI_tool_that_helps.log",
+  "path": "/v1/chat/completions",
+  "agent": "opencode/1.19.3 ai-sdk/provider-utils/4.",
+  "chars": 32202,
+  "tools": 9,
+  "msgs": 5,
+  "session": "",
+  "cancelled": false,
+  "group": "oc"
+ },
+ {
+  "file": "2026-10-23T19-50-33Z_chatcmpl-86883e11f75b76d4_SYSTEM_You_are_Hermes_Agent_an_intelligent_AI_assistant_created.log",
+  "path": "/v1/chat/completions",
+  "agent": "OpenAI/Python 2.24.0",
+  "chars": 167230,
+  "tools": 19,
+  "msgs": 113,
+  "session": "",
+  "cancelled": false,
+  "group": "hermes"
+ },
+ {
+  "file": "2026-10-23T17-17-42Z_chatcmpl-8d0a1185980d6a73_SYSTEM_You_are_Hermes_Agent_an_intelligent_AI_assistant_created.log",
+  "path": "/v1/chat/completions",
+  "agent": "OpenAI/Python 2.24.0",
+  "chars": 94206,
+  "tools": 19,
+  "msgs": 18,
+  "session": "",
+  "cancelled": false,
+  "group": "hermes"
+ },
+ {
+  "file": "2026-10-23T20-44-52Z_chatcmpl-b4cba71e5024ef88_SYSTEM_You_are_Hermes_Agent_an_intelligent_AI_assistant_created.log",
+  "path": "/v1/chat/completions",
+  "agent": "OpenAI/Python 2.24.0",
+  "chars": 199343,
+  "tools": 19,
+  "msgs": 66,
+  "session": "",
+  "cancelled": false,
+  "group": "hermes"
+ },
+ {
+  "file": "2026-10-23T17-39-14Z_chatcmpl-ac63b57318f56297_SYSTEM_You_are_Hermes_Agent_an_intelligent_AI_assistant_created.log",
+  "path": "/v1/chat/completions",
+  "agent": "OpenAI/Python 2.24.0",
+  "chars": 84690,
+  "tools": 19,
+  "msgs": 18,
+  "session": "",
+  "cancelled": false,
+  "group": "hermes"
+ },
+ {
+  "file": "2026-10-23T16-57-06Z_chatcmpl-93e6ecee209cf1f8_SYSTEM_You_are_Hermes_Agent_an_intelligent_AI_assistant_created.log",
+  "path": "/v1/chat/completions",
+  "agent": "OpenAI/Python 2.24.0",
+  "chars": 135998,
+  "tools": 19,
+  "msgs": 72,
+  "session": "",
+  "cancelled": false,
+  "group": "hermes"
+ },
+ {
+  "file": "2026-10-23T20-39-35Z_chatcmpl-9f525e5be14e0feb_SYSTEM_You_are_Hermes_Agent_an_intelligent_AI_assistant_created.log",
+  "path": "/v1/chat/completions",
+  "agent": "OpenAI/Python 2.24.0",
+  "chars": 150917,
+  "tools": 19,
+  "msgs": 67,
+  "session": "",
+  "cancelled": false,
+  "group": "hermes"
+ }
+]

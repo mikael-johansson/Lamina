@@ -1,0 +1,231 @@
+{
+ "tag": "split28",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "28",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "py-small",
+   "wall_s": 10.5,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 3099.0,
+   "prompt_s": 7.1,
+   "gen_n": 580,
+   "decode_tps": 172.8,
+   "draft": [
+    475,
+    360
+   ],
+   "tiers": {
+    "main_swaps": 1152,
+    "main_fills": 700,
+    "main_dropped": 226,
+    "second_entries": 32776,
+    "second_experts": 26690,
+    "second_layers": 5410,
+    "second_cpu_layers": 2566,
+    "second_swaps": 453,
+    "second_fills": 2433,
+    "second_dropped": 58,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "opencode-30k",
+   "wall_s": 17.1,
+   "error": null,
+   "prompt_n": 48621,
+   "cache_n": 0,
+   "prefill_tps": 4109.2,
+   "prompt_s": 11.8,
+   "gen_n": 935,
+   "decode_tps": 178.7,
+   "draft": [
+    760,
+    573
+   ],
+   "tiers": {
+    "main_swaps": 2975,
+    "main_fills": 891,
+    "main_dropped": 303,
+    "second_entries": 90270,
+    "second_experts": 74694,
+    "second_layers": 11646,
+    "second_cpu_layers": 2906,
+    "second_swaps": 1214,
+    "second_fills": 2728,
+    "second_dropped": 165,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "write"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 14.8,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3691.5,
+   "prompt_s": 10.9,
+   "gen_n": 672,
+   "decode_tps": 174.6,
+   "draft": [
+    541,
+    399
+   ],
+   "tiers": {
+    "main_swaps": 2098,
+    "main_fills": 791,
+    "main_dropped": 140,
+    "second_entries": 53246,
+    "second_experts": 43073,
+    "second_layers": 8446,
+    "second_cpu_layers": 2345,
+    "second_swaps": 930,
+    "second_fills": 2608,
+    "second_dropped": 128,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "The visible test files still reference `GetStarred`. Let me check the actual upstream Navidrome PR to understand exactly what the final state should look like, and check the migrations and other callers:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 24.0,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4274.2,
+   "prompt_s": 21.1,
+   "gen_n": 541,
+   "decode_tps": 192.1,
+   "draft": [
+    437,
+    358
+   ],
+   "tiers": {
+    "main_swaps": 1547,
+    "main_fills": 846,
+    "main_dropped": 17,
+    "second_entries": 39482,
+    "second_experts": 32556,
+    "second_layers": 6059,
+    "second_cpu_layers": 1529,
+    "second_swaps": 680,
+    "second_fills": 2793,
+    "second_dropped": 36,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch updates are failing. To be sure that my source changes will pass the patched tests, I'll temporarily apply the upstream test patch, run the tests, and then revert the test files back to their original state:"
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 33.6,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4483.9,
+   "prompt_s": 32.5,
+   "gen_n": 148,
+   "decode_tps": 178.2,
+   "draft": [
+    143,
+    117
+   ],
+   "tiers": {
+    "main_swaps": 1038,
+    "main_fills": 891,
+    "main_dropped": 404,
+    "second_entries": 20699,
+    "second_experts": 15234,
+    "second_layers": 1410,
+    "second_cpu_layers": 62,
+    "second_swaps": 301,
+    "second_fills": 2990,
+    "second_dropped": 362,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 26
+}

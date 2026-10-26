@@ -1,0 +1,330 @@
+{
+ "tag": "iq3-res512",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "26",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 3.0,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 180.6,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 217.5,
+   "draft": [
+    476,
+    424
+   ],
+   "tiers": {
+    "main_swaps": 2567,
+    "main_fills": 290,
+    "main_dropped": 476,
+    "second_entries": 83402,
+    "second_experts": 65968,
+    "second_layers": 7776,
+    "second_cpu_layers": 511,
+    "second_swaps": 639,
+    "second_fills": 241,
+    "second_dropped": 25,
+    "second_empty_slots": 0,
+    "second_prefetched": 5636,
+    "second_prefetch_used": 2668,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "thinking",
+   "wall_s": 10.6,
+   "error": null,
+   "prompt_n": 75,
+   "cache_n": 0,
+   "prefill_tps": 294.3,
+   "prompt_s": 0.3,
+   "gen_n": 1733,
+   "decode_tps": 168.0,
+   "draft": [
+    1370,
+    1084
+   ],
+   "tiers": {
+    "main_swaps": 4546,
+    "main_fills": 292,
+    "main_dropped": 188,
+    "second_entries": 154146,
+    "second_experts": 133056,
+    "second_layers": 22098,
+    "second_cpu_layers": 5463,
+    "second_swaps": 2483,
+    "second_fills": 246,
+    "second_dropped": 337,
+    "second_empty_slots": 0,
+    "second_prefetched": 29932,
+    "second_prefetch_used": 14029,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "Assume, for contradiction, that there are only finitely many primes of the form \\(4k+3\\). List them as\n\n\\[\np_1,p_2,\\dots,p_n.\n\\]\n\nLet\n\n\\[\nP=p_1p_2\\cdots p_n\n\\]\n\nand define\n\n\\[\nN=4P-1.\n\\]\n\nThen\n\n\\[\nN \\equiv -1 \\equiv 3 \\pmod 4.\n\\]\n\nSo \\(N\\) is an odd integer congruent to \\(3 \\pmod 4\\).\n\nNow consider "
+  },
+  {
+   "name": "py-small",
+   "wall_s": 10.9,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 2970.5,
+   "prompt_s": 7.4,
+   "gen_n": 582,
+   "decode_tps": 164.7,
+   "draft": [
+    476,
+    382
+   ],
+   "tiers": {
+    "main_swaps": 1704,
+    "main_fills": 702,
+    "main_dropped": 179,
+    "second_entries": 42878,
+    "second_experts": 35441,
+    "second_layers": 6410,
+    "second_cpu_layers": 1562,
+    "second_swaps": 784,
+    "second_fills": 2594,
+    "second_dropped": 456,
+    "second_empty_slots": 0,
+    "second_prefetched": 8113,
+    "second_prefetch_used": 4210,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "opencode-30k",
+   "wall_s": 18.5,
+   "error": null,
+   "prompt_n": 48621,
+   "cache_n": 0,
+   "prefill_tps": 4025.7,
+   "prompt_s": 12.1,
+   "gen_n": 1004,
+   "decode_tps": 155.4,
+   "draft": [
+    825,
+    649
+   ],
+   "tiers": {
+    "main_swaps": 3753,
+    "main_fills": 894,
+    "main_dropped": 231,
+    "second_entries": 112595,
+    "second_experts": 92712,
+    "second_layers": 13234,
+    "second_cpu_layers": 2091,
+    "second_swaps": 1574,
+    "second_fills": 2900,
+    "second_dropped": 581,
+    "second_empty_slots": 0,
+    "second_prefetched": 18976,
+    "second_prefetch_used": 8629,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "write"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 15.5,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3627.1,
+   "prompt_s": 11.1,
+   "gen_n": 629,
+   "decode_tps": 143.6,
+   "draft": [
+    496,
+    383
+   ],
+   "tiers": {
+    "main_swaps": 3099,
+    "main_fills": 794,
+    "main_dropped": 180,
+    "second_entries": 62089,
+    "second_experts": 49368,
+    "second_layers": 8343,
+    "second_cpu_layers": 1718,
+    "second_swaps": 1359,
+    "second_fills": 2787,
+    "second_dropped": 711,
+    "second_empty_slots": 0,
+    "second_prefetched": 11590,
+    "second_prefetch_used": 6988,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "The test files still reference `GetStarred` and fixtures without `Genres`. Let me check the actual upstream Navidrome commit that implemented this PR to understand the exact expected final state:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 26.1,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4201.5,
+   "prompt_s": 21.4,
+   "gen_n": 705,
+   "decode_tps": 154.1,
+   "draft": [
+    558,
+    447
+   ],
+   "tiers": {
+    "main_swaps": 2248,
+    "main_fills": 848,
+    "main_dropped": 98,
+    "second_entries": 59766,
+    "second_experts": 49369,
+    "second_layers": 8405,
+    "second_cpu_layers": 1985,
+    "second_swaps": 1197,
+    "second_fills": 2980,
+    "second_dropped": 230,
+    "second_empty_slots": 0,
+    "second_prefetched": 11522,
+    "second_prefetch_used": 5586,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-80k-next",
+   "wall_s": 1.9,
+   "error": null,
+   "prompt_n": 1010,
+   "cache_n": 90044,
+   "prefill_tps": 1385.5,
+   "prompt_s": 0.7,
+   "gen_n": 200,
+   "decode_tps": 172.7,
+   "draft": [
+    175,
+    143
+   ],
+   "tiers": {
+    "main_swaps": 615,
+    "main_fills": 334,
+    "main_dropped": 0,
+    "second_entries": 17803,
+    "second_experts": 14858,
+    "second_layers": 2136,
+    "second_cpu_layers": 389,
+    "second_swaps": 300,
+    "second_fills": 390,
+    "second_dropped": 72,
+    "second_empty_slots": 0,
+    "second_prefetched": 3704,
+    "second_prefetch_used": 1547,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 34.2,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4481.1,
+   "prompt_s": 32.5,
+   "gen_n": 146,
+   "decode_tps": 102.2,
+   "draft": [
+    143,
+    114
+   ],
+   "tiers": {
+    "main_swaps": 1459,
+    "main_fills": 894,
+    "main_dropped": 0,
+    "second_entries": 23125,
+    "second_experts": 16891,
+    "second_layers": 1432,
+    "second_cpu_layers": 101,
+    "second_swaps": 333,
+    "second_fills": 3195,
+    "second_dropped": 542,
+    "second_empty_slots": 0,
+    "second_prefetched": 4496,
+    "second_prefetch_used": 2491,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 26
+}

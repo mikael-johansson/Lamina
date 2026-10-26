@@ -1,0 +1,193 @@
+{
+ "tag": "hs-0.5",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "26",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--verify-cache"
+ ],
+ "env": {
+  "STRATA_HOT_SPLIT": "0.5"
+ },
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 3.4,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 159.4,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 195.5,
+   "draft": [
+    493,
+    423
+   ],
+   "tiers": {
+    "main_swaps": 2893,
+    "main_fills": 283,
+    "main_dropped": 430,
+    "second_entries": 78241,
+    "second_experts": 60965,
+    "second_layers": 7732,
+    "second_cpu_layers": 600,
+    "second_swaps": 1236,
+    "second_fills": 240,
+    "second_dropped": 59,
+    "second_empty_slots": 0,
+    "second_prefetched": 5737,
+    "second_prefetch_used": 3327,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "thinking",
+   "wall_s": 9.8,
+   "error": null,
+   "prompt_n": 75,
+   "cache_n": 0,
+   "prefill_tps": 284.3,
+   "prompt_s": 0.3,
+   "gen_n": 1511,
+   "decode_tps": 158.6,
+   "draft": [
+    1251,
+    938
+   ],
+   "tiers": {
+    "main_swaps": 5095,
+    "main_fills": 285,
+    "main_dropped": 180,
+    "second_entries": 171304,
+    "second_experts": 147943,
+    "second_layers": 22474,
+    "second_cpu_layers": 3543,
+    "second_swaps": 3020,
+    "second_fills": 245,
+    "second_dropped": 626,
+    "second_empty_slots": 0,
+    "second_prefetched": 24618,
+    "second_prefetch_used": 12862,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "**Proof.** Suppose, for contradiction, that there are only finitely many primes congruent to \\(3 \\pmod 4\\). List them as\n\n\\[\np_1,p_2,\\dots,p_n.\n\\]\n\nLet\n\n\\[\nP=p_1p_2\\cdots p_n\n\\]\n\nand consider\n\n\\[\nN=4P-1.\n\\]\n\nThen\n\n\\[\nN \\equiv -1 \\equiv 3 \\pmod 4.\n\\]\n\nAlso, for each \\(p_i\\),\n\n\\[\nN=4P-1 \\equiv -1 \\pmo"
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 16.4,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3582.0,
+   "prompt_s": 11.3,
+   "gen_n": 721,
+   "decode_tps": 141.8,
+   "draft": [
+    584,
+    469
+   ],
+   "tiers": {
+    "main_swaps": 4560,
+    "main_fills": 781,
+    "main_dropped": 352,
+    "second_entries": 104811,
+    "second_experts": 82337,
+    "second_layers": 10530,
+    "second_cpu_layers": 685,
+    "second_swaps": 1849,
+    "second_fills": 3140,
+    "second_dropped": 922,
+    "second_empty_slots": 0,
+    "second_prefetched": 12460,
+    "second_prefetch_used": 6841,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "The persistence tests still use `GetStarred` and fixtures without album `Genres`. Let me check the subsonic server tests and other test files that may have been updated:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 26.3,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4094.1,
+   "prompt_s": 22.0,
+   "gen_n": 578,
+   "decode_tps": 140.6,
+   "draft": [
+    449,
+    379
+   ],
+   "tiers": {
+    "main_swaps": 2350,
+    "main_fills": 836,
+    "main_dropped": 26,
+    "second_entries": 59440,
+    "second_experts": 49340,
+    "second_layers": 7731,
+    "second_cpu_layers": 1345,
+    "second_swaps": 1349,
+    "second_fills": 3338,
+    "second_dropped": 369,
+    "second_empty_slots": 0,
+    "second_prefetched": 8960,
+    "second_prefetch_used": 4738,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch explicitly updates are failing. To prove that my source changes make the patched tests pass, I'll apply the PR's **test-only** hunks to a scratch copy of the repo (leaving the test files in `/app` untouched):"
+  }
+ ],
+ "ready_s": 30
+}

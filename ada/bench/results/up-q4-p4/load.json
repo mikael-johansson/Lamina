@@ -1,0 +1,6 @@
+{
+ "tag": "up-q4-p4",
+ "config": "configs/up-ud-q4_k_xl-p4.json",
+ "parallel": 4,
+ "rounds": []
+}

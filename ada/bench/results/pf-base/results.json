@@ -1,0 +1,296 @@
+{
+ "tag": "pf-base",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "26",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 2.9,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 178.0,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 231.9,
+   "draft": [
+    473,
+    422
+   ],
+   "tiers": {
+    "main_swaps": 1354,
+    "main_fills": 288,
+    "main_dropped": 186,
+    "second_entries": 59879,
+    "second_experts": 49320,
+    "second_layers": 7157,
+    "second_cpu_layers": 1038,
+    "second_swaps": 332,
+    "second_fills": 236,
+    "second_dropped": 8,
+    "second_empty_slots": 0,
+    "second_prefetched": 3119,
+    "second_prefetch_used": 1415,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "thinking",
+   "wall_s": 8.9,
+   "error": null,
+   "prompt_n": 75,
+   "cache_n": 0,
+   "prefill_tps": 387.4,
+   "prompt_s": 0.2,
+   "gen_n": 1679,
+   "decode_tps": 192.6,
+   "draft": [
+    1365,
+    1066
+   ],
+   "tiers": {
+    "main_swaps": 2866,
+    "main_fills": 290,
+    "main_dropped": 19,
+    "second_entries": 138835,
+    "second_experts": 121762,
+    "second_layers": 20205,
+    "second_cpu_layers": 5599,
+    "second_swaps": 1504,
+    "second_fills": 240,
+    "second_dropped": 96,
+    "second_empty_slots": 0,
+    "second_prefetched": 15494,
+    "second_prefetch_used": 7167,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "We prove the infinitude of primes congruent to \\(3 \\pmod 4\\), i.e. primes of the form \\(4k+3\\).\n\n## Proof\n\nSuppose, for contradiction, that there are only finitely many primes of the form \\(4k+3\\). List them as\n\n\\[\np_1,p_2,\\dots,p_n.\n\\]\n\nLet\n\n\\[\nP=p_1p_2\\cdots p_n\n\\]\n\nand consider the number\n\n\\[\nN=4"
+  },
+  {
+   "name": "py-small",
+   "wall_s": 10.7,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 2981.8,
+   "prompt_s": 7.4,
+   "gen_n": 580,
+   "decode_tps": 172.8,
+   "draft": [
+    489,
+    377
+   ],
+   "tiers": {
+    "main_swaps": 1579,
+    "main_fills": 699,
+    "main_dropped": 117,
+    "second_entries": 44612,
+    "second_experts": 36716,
+    "second_layers": 6427,
+    "second_cpu_layers": 1709,
+    "second_swaps": 718,
+    "second_fills": 2496,
+    "second_dropped": 170,
+    "second_empty_slots": 0,
+    "second_prefetched": 5458,
+    "second_prefetch_used": 2841,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 15.7,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3675.4,
+   "prompt_s": 11.0,
+   "gen_n": 752,
+   "decode_tps": 160.2,
+   "draft": [
+    625,
+    470
+   ],
+   "tiers": {
+    "main_swaps": 3202,
+    "main_fills": 788,
+    "main_dropped": 207,
+    "second_entries": 88166,
+    "second_experts": 70213,
+    "second_layers": 10253,
+    "second_cpu_layers": 1709,
+    "second_swaps": 1240,
+    "second_fills": 2653,
+    "second_dropped": 196,
+    "second_empty_slots": 0,
+    "second_prefetched": 10243,
+    "second_prefetch_used": 5231,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash",
+    "Bash"
+   ],
+   "text": "The test files in the repo appear to be the pre-PR versions (they still reference `GetStarred` and lack `Genres` fixtures) \u2014 the evaluation harness will swap in the updated tests. So I need to implement the actual upstream PR faithfully. Let me gather all the relevant code:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 25.9,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4160.9,
+   "prompt_s": 21.6,
+   "gen_n": 677,
+   "decode_tps": 160.6,
+   "draft": [
+    523,
+    420
+   ],
+   "tiers": {
+    "main_swaps": 1472,
+    "main_fills": 844,
+    "main_dropped": 105,
+    "second_entries": 57045,
+    "second_experts": 47765,
+    "second_layers": 8158,
+    "second_cpu_layers": 2235,
+    "second_swaps": 773,
+    "second_fills": 2874,
+    "second_dropped": 134,
+    "second_empty_slots": 0,
+    "second_prefetched": 8210,
+    "second_prefetch_used": 3728,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch updates are failing. To prove that my source changes pass the patched tests, I'll temporarily apply the test-only hunks from the upstream diff, run the tests, and then restore the test files:"
+  },
+  {
+   "name": "cc-80k-next",
+   "wall_s": 2.3,
+   "error": null,
+   "prompt_n": 1010,
+   "cache_n": 90044,
+   "prefill_tps": 1413.4,
+   "prompt_s": 0.7,
+   "gen_n": 277,
+   "decode_tps": 177.7,
+   "draft": [
+    247,
+    189
+   ],
+   "tiers": {
+    "main_swaps": 615,
+    "main_fills": 333,
+    "main_dropped": 0,
+    "second_entries": 25213,
+    "second_experts": 21253,
+    "second_layers": 3018,
+    "second_cpu_layers": 738,
+    "second_swaps": 258,
+    "second_fills": 383,
+    "second_dropped": 66,
+    "second_empty_slots": 0,
+    "second_prefetched": 3762,
+    "second_prefetch_used": 1483,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 34.4,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4432.2,
+   "prompt_s": 32.9,
+   "gen_n": 147,
+   "decode_tps": 111.4,
+   "draft": [
+    140,
+    116
+   ],
+   "tiers": {
+    "main_swaps": 1363,
+    "main_fills": 890,
+    "main_dropped": 0,
+    "second_entries": 23135,
+    "second_experts": 16874,
+    "second_layers": 1387,
+    "second_cpu_layers": 94,
+    "second_swaps": 328,
+    "second_fills": 3100,
+    "second_dropped": 395,
+    "second_empty_slots": 0,
+    "second_prefetched": 3826,
+    "second_prefetch_used": 2050,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 26
+}

@@ -1,0 +1,56 @@
+{
+ "tag": "up-q4-p1",
+ "config": "configs/up-ud-q4_k_xl.json",
+ "parallel": 1,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 7.0,
+   "total_tokens": 512,
+   "total_tps": 72.8,
+   "clients": [
+    {
+     "ttft_s": 0.67,
+     "tokens": 512,
+     "decode_tps": 80.4,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 1,
+   "wall_s": 5.5,
+   "total_tokens": 512,
+   "total_tps": 93.6,
+   "clients": [
+    {
+     "ttft_s": 0.49,
+     "tokens": 512,
+     "decode_tps": 102.6,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "long",
+   "c": 1,
+   "round": 0,
+   "wall_s": 30.2,
+   "total_tokens": 256,
+   "total_tps": 8.5,
+   "clients": [
+    {
+     "ttft_s": 24.76,
+     "tokens": 256,
+     "decode_tps": 46.9,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 97
+}

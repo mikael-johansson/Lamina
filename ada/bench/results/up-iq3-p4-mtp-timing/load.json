@@ -1,0 +1,80 @@
+{
+ "tag": "up-iq3-p4-mtp-timing",
+ "config": "configs/up-iq3_s-p4-mtp.json",
+ "parallel": 4,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 3.8,
+   "total_tokens": 512,
+   "total_tps": 134.7,
+   "clients": [
+    {
+     "ttft_s": 0.36,
+     "tokens": 512,
+     "decode_tps": 148.3,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 0,
+   "wall_s": 7.0,
+   "total_tokens": 1024,
+   "total_tps": 145.7,
+   "clients": [
+    {
+     "ttft_s": 0.18,
+     "tokens": 512,
+     "decode_tps": 74.6,
+     "error": null
+    },
+    {
+     "ttft_s": 0.72,
+     "tokens": 512,
+     "decode_tps": 81.2,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 4,
+   "round": 0,
+   "wall_s": 12.0,
+   "total_tokens": 1982,
+   "total_tps": 165.3,
+   "clients": [
+    {
+     "ttft_s": 0.6,
+     "tokens": 512,
+     "decode_tps": 45.3,
+     "error": null
+    },
+    {
+     "ttft_s": 0.18,
+     "tokens": 512,
+     "decode_tps": 43.8,
+     "error": null
+    },
+    {
+     "ttft_s": 1.1,
+     "tokens": 446,
+     "decode_tps": 45.4,
+     "error": null
+    },
+    {
+     "ttft_s": 1.6,
+     "tokens": 512,
+     "decode_tps": 49.2,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 44
+}

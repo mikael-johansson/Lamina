@@ -1,0 +1,262 @@
+{
+ "tag": "t2-spec5",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "5",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "28",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 2.8,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 181.0,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 241.1,
+   "draft": [
+    535,
+    448
+   ],
+   "tiers": {
+    "main_swaps": 1636,
+    "main_fills": 290,
+    "main_dropped": 207,
+    "second_entries": 59120,
+    "second_experts": 47323,
+    "second_layers": 6339,
+    "second_cpu_layers": 694,
+    "second_swaps": 383,
+    "second_fills": 235,
+    "second_dropped": 10,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "thinking",
+   "wall_s": 8.2,
+   "error": null,
+   "prompt_n": 75,
+   "cache_n": 0,
+   "prefill_tps": 361.3,
+   "prompt_s": 0.2,
+   "gen_n": 1565,
+   "decode_tps": 196.1,
+   "draft": [
+    1413,
+    1035
+   ],
+   "tiers": {
+    "main_swaps": 3001,
+    "main_fills": 292,
+    "main_dropped": 60,
+    "second_entries": 120118,
+    "second_experts": 104618,
+    "second_layers": 17785,
+    "second_cpu_layers": 4213,
+    "second_swaps": 1584,
+    "second_fills": 239,
+    "second_dropped": 131,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "**Proof.** Suppose, for contradiction, that there are only finitely many primes of the form \\(4k+3\\). List them as\n\n\\[\np_1,p_2,\\dots,p_n.\n\\]\n\nLet\n\n\\[\nP=p_1p_2\\cdots p_n\n\\]\n\nand consider\n\n\\[\nN=4P-1.\n\\]\n\nThen\n\n\\[\nN \\equiv -1 \\equiv 3 \\pmod 4.\n\\]\n\nSince \\(N\\) is odd, every prime divisor of \\(N\\) is eit"
+  },
+  {
+   "name": "py-small",
+   "wall_s": 10.7,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 2969.3,
+   "prompt_s": 7.4,
+   "gen_n": 582,
+   "decode_tps": 179.9,
+   "draft": [
+    568,
+    376
+   ],
+   "tiers": {
+    "main_swaps": 1485,
+    "main_fills": 700,
+    "main_dropped": 216,
+    "second_entries": 35991,
+    "second_experts": 29750,
+    "second_layers": 6097,
+    "second_cpu_layers": 1771,
+    "second_swaps": 685,
+    "second_fills": 2421,
+    "second_dropped": 222,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 15.2,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3580.0,
+   "prompt_s": 11.3,
+   "gen_n": 692,
+   "decode_tps": 176.7,
+   "draft": [
+    590,
+    432
+   ],
+   "tiers": {
+    "main_swaps": 2568,
+    "main_fills": 789,
+    "main_dropped": 359,
+    "second_entries": 65765,
+    "second_experts": 52032,
+    "second_layers": 8431,
+    "second_cpu_layers": 1914,
+    "second_swaps": 983,
+    "second_fills": 2581,
+    "second_dropped": 249,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "The persistence tests still reference `GetStarred`. Let me search the whole repo for usages of `GetStarred`, `filter.Starred`, and album `Genres` to see which tests expect the new API:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 26.2,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4033.4,
+   "prompt_s": 22.3,
+   "gen_n": 665,
+   "decode_tps": 178.2,
+   "draft": [
+    606,
+    436
+   ],
+   "tiers": {
+    "main_swaps": 1719,
+    "main_fills": 843,
+    "main_dropped": 19,
+    "second_entries": 48286,
+    "second_experts": 39704,
+    "second_layers": 7284,
+    "second_cpu_layers": 2088,
+    "second_swaps": 747,
+    "second_fills": 2768,
+    "second_dropped": 61,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch explicitly updates are failing. To prove that the patched tests pass with my source changes, I'll apply the test-only hunks from the PR to a **copy** of the repository (leaving the test files in /app untouched) and run them there:"
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 35.2,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4271.4,
+   "prompt_s": 34.1,
+   "gen_n": 148,
+   "decode_tps": 168.9,
+   "draft": [
+    138,
+    121
+   ],
+   "tiers": {
+    "main_swaps": 948,
+    "main_fills": 888,
+    "main_dropped": 598,
+    "second_entries": 19533,
+    "second_experts": 14225,
+    "second_layers": 1293,
+    "second_cpu_layers": 26,
+    "second_swaps": 255,
+    "second_fills": 2960,
+    "second_dropped": 615,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 26
+}

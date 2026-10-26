@@ -1,0 +1,56 @@
+{
+ "tag": "up-iq3-p1",
+ "config": "configs/up-iq3_s.json",
+ "parallel": 1,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 3.2,
+   "total_tokens": 512,
+   "total_tps": 157.9,
+   "clients": [
+    {
+     "ttft_s": 0.35,
+     "tokens": 512,
+     "decode_tps": 176.4,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 1,
+   "wall_s": 3.0,
+   "total_tokens": 512,
+   "total_tps": 169.5,
+   "clients": [
+    {
+     "ttft_s": 0.28,
+     "tokens": 512,
+     "decode_tps": 186.2,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "long",
+   "c": 1,
+   "round": 0,
+   "wall_s": 19.2,
+   "total_tokens": 256,
+   "total_tps": 13.4,
+   "clients": [
+    {
+     "ttft_s": 17.22,
+     "tokens": 256,
+     "decode_tps": 131.4,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 62
+}

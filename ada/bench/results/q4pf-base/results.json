@@ -1,0 +1,193 @@
+{
+ "tag": "q4pf-base",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/ud-q4_k_xl",
+  "--native",
+  "/d/nvme_512/strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "int8",
+  "--kv-grow",
+  "--hc-q8",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0.2",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--head-split",
+  "0",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "26",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 6.7,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 76.0,
+   "prompt_s": 0.6,
+   "gen_n": 600,
+   "decode_tps": 99.3,
+   "draft": [
+    505,
+    418
+   ],
+   "tiers": {
+    "main_swaps": 4309,
+    "main_fills": 185,
+    "main_dropped": 365,
+    "second_entries": 78471,
+    "second_experts": 62081,
+    "second_layers": 8054,
+    "second_cpu_layers": 353,
+    "second_swaps": 1787,
+    "second_fills": 170,
+    "second_dropped": 1229,
+    "second_empty_slots": 0,
+    "second_prefetched": 18446,
+    "second_prefetch_used": 10202,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n    \n    Supports the format PnYnMnDTnHnMnS where:\n    - P is the period designator\n    - Y = years, M = months (in date part), D = days\n    - T is the time desig"
+  },
+  {
+   "name": "py-small",
+   "wall_s": 19.0,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 1766.6,
+   "prompt_s": 12.5,
+   "gen_n": 580,
+   "decode_tps": 86.3,
+   "draft": [
+    509,
+    352
+   ],
+   "tiers": {
+    "main_swaps": 3568,
+    "main_fills": 449,
+    "main_dropped": 688,
+    "second_entries": 74133,
+    "second_experts": 58947,
+    "second_layers": 8628,
+    "second_cpu_layers": 752,
+    "second_swaps": 1439,
+    "second_fills": 2260,
+    "second_dropped": 2050,
+    "second_empty_slots": 0,
+    "second_prefetched": 17317,
+    "second_prefetch_used": 10626,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 27.5,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 2156.3,
+   "prompt_s": 18.7,
+   "gen_n": 681,
+   "decode_tps": 78.2,
+   "draft": [
+    567,
+    430
+   ],
+   "tiers": {
+    "main_swaps": 6692,
+    "main_fills": 508,
+    "main_dropped": 352,
+    "second_entries": 111738,
+    "second_experts": 89362,
+    "second_layers": 11352,
+    "second_cpu_layers": 432,
+    "second_swaps": 2148,
+    "second_fills": 2364,
+    "second_dropped": 3238,
+    "second_empty_slots": 0,
+    "second_prefetched": 25757,
+    "second_prefetch_used": 16583,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash",
+    "Bash"
+   ],
+   "text": "The persistence tests still reference `GetStarred`. Let me search the whole repo for the new API usages in tests to see what's expected:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 49.5,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 2199.5,
+   "prompt_s": 40.9,
+   "gen_n": 633,
+   "decode_tps": 72.9,
+   "draft": [
+    508,
+    380
+   ],
+   "tiers": {
+    "main_swaps": 6360,
+    "main_fills": 543,
+    "main_dropped": 1098,
+    "second_entries": 102474,
+    "second_experts": 79168,
+    "second_layers": 10054,
+    "second_cpu_layers": 696,
+    "second_swaps": 2007,
+    "second_fills": 2542,
+    "second_dropped": 4233,
+    "second_empty_slots": 0,
+    "second_prefetched": 24171,
+    "second_prefetch_used": 15912,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 78
+}

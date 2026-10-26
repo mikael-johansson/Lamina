@@ -1,0 +1,161 @@
+{
+ "tag": "q4split30",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/ud-q4_k_xl",
+  "--native",
+  "/d/nvme_512/strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "int8",
+  "--kv-grow",
+  "--hc-q8",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0.2",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--head-split",
+  "0",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "30",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "py-small",
+   "wall_s": 27.8,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 940.6,
+   "prompt_s": 23.4,
+   "gen_n": 582,
+   "decode_tps": 133.6,
+   "draft": [
+    474,
+    388
+   ],
+   "tiers": {
+    "main_swaps": 1640,
+    "main_fills": 453,
+    "main_dropped": 875,
+    "second_entries": 54007,
+    "second_experts": 44533,
+    "second_layers": 7249,
+    "second_cpu_layers": 574,
+    "second_swaps": 1145,
+    "second_fills": 2078,
+    "second_dropped": 736,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 33.9,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 1325.4,
+   "prompt_s": 30.5,
+   "gen_n": 354,
+   "decode_tps": 107.2,
+   "draft": [
+    293,
+    237
+   ],
+   "tiers": {
+    "main_swaps": 2095,
+    "main_fills": 512,
+    "main_dropped": 2442,
+    "second_entries": 50254,
+    "second_experts": 40290,
+    "second_layers": 5387,
+    "second_cpu_layers": 102,
+    "second_swaps": 1360,
+    "second_fills": 2193,
+    "second_dropped": 1751,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "The persistence tests look like the pre-PR state. Let me search the whole repo for references to the new API to find which tests were updated:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 50.2,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 2027.7,
+   "prompt_s": 44.4,
+   "gen_n": 605,
+   "decode_tps": 107.7,
+   "draft": [
+    515,
+    388
+   ],
+   "tiers": {
+    "main_swaps": 3452,
+    "main_fills": 547,
+    "main_dropped": 2339,
+    "second_entries": 74292,
+    "second_experts": 60502,
+    "second_layers": 9362,
+    "second_cpu_layers": 501,
+    "second_swaps": 1711,
+    "second_fills": 2331,
+    "second_dropped": 2609,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two `advanced` cases fail \u2014 both are failing solely because the unpatched test literals are missing the new fields, and this is exactly what the upstream test patch fixes. To prove that my source changes are compatible with the patched tests, I'll temporarily apply the upstream **test-only*"
+  }
+ ],
+ "ready_s": 80
+}

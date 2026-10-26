@@ -1,0 +1,197 @@
+{
+ "tag": "ab-fused2",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "28",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0"
+ ],
+ "env": {
+  "STRATA_POOL_FUSED": "1"
+ },
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 2.8,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 184.0,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 240.3,
+   "draft": [
+    469,
+    423
+   ],
+   "tiers": {
+    "main_swaps": 1118,
+    "main_fills": 289,
+    "main_dropped": 111,
+    "second_entries": 54353,
+    "second_experts": 45837,
+    "second_layers": 6879,
+    "second_cpu_layers": 1147,
+    "second_swaps": 292,
+    "second_fills": 237,
+    "second_dropped": 7,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "py-small",
+   "wall_s": 10.2,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 3086.3,
+   "prompt_s": 7.1,
+   "gen_n": 578,
+   "decode_tps": 191.6,
+   "draft": [
+    489,
+    372
+   ],
+   "tiers": {
+    "main_swaps": 1024,
+    "main_fills": 703,
+    "main_dropped": 195,
+    "second_entries": 36633,
+    "second_experts": 31065,
+    "second_layers": 5864,
+    "second_cpu_layers": 2048,
+    "second_swaps": 395,
+    "second_fills": 2441,
+    "second_dropped": 178,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 14.8,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3697.4,
+   "prompt_s": 10.9,
+   "gen_n": 735,
+   "decode_tps": 191.5,
+   "draft": [
+    578,
+    472
+   ],
+   "tiers": {
+    "main_swaps": 2578,
+    "main_fills": 793,
+    "main_dropped": 298,
+    "second_entries": 71379,
+    "second_experts": 58244,
+    "second_layers": 9283,
+    "second_cpu_layers": 1658,
+    "second_swaps": 981,
+    "second_fills": 2597,
+    "second_dropped": 255,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash",
+    "Bash"
+   ],
+   "text": "The current tests still reference `GetStarred`, which conflicts with the PR description. Let me check the actual upstream Navidrome PR this corresponds to, and look at the remaining relevant files (migrations, controllers, fixtures):"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 25.3,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4211.4,
+   "prompt_s": 21.4,
+   "gen_n": 713,
+   "decode_tps": 188.5,
+   "draft": [
+    535,
+    441
+   ],
+   "tiers": {
+    "main_swaps": 1328,
+    "main_fills": 848,
+    "main_dropped": 125,
+    "second_entries": 47700,
+    "second_experts": 40468,
+    "second_layers": 7687,
+    "second_cpu_layers": 2625,
+    "second_swaps": 669,
+    "second_fills": 2799,
+    "second_dropped": 73,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch explicitly updates are failing. To prove that the patched tests pass with my changes, I'll apply the test-only portion of the PR diff to a **copy** of the repo (leaving the test files in `/app` untouched):"
+  }
+ ],
+ "ready_s": 26
+}

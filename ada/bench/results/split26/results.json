@@ -1,0 +1,232 @@
+{
+ "tag": "split26",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "26",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "py-small",
+   "wall_s": 10.6,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 3068.3,
+   "prompt_s": 7.2,
+   "gen_n": 581,
+   "decode_tps": 168.9,
+   "draft": [
+    500,
+    350
+   ],
+   "tiers": {
+    "main_swaps": 785,
+    "main_fills": 698,
+    "main_dropped": 160,
+    "second_entries": 35127,
+    "second_experts": 29793,
+    "second_layers": 6080,
+    "second_cpu_layers": 2751,
+    "second_swaps": 232,
+    "second_fills": 2485,
+    "second_dropped": 41,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "opencode-30k",
+   "wall_s": 17.0,
+   "error": null,
+   "prompt_n": 48621,
+   "cache_n": 0,
+   "prefill_tps": 4017.7,
+   "prompt_s": 12.1,
+   "gen_n": 897,
+   "decode_tps": 184.1,
+   "draft": [
+    749,
+    557
+   ],
+   "tiers": {
+    "main_swaps": 2265,
+    "main_fills": 888,
+    "main_dropped": 218,
+    "second_entries": 86728,
+    "second_experts": 72306,
+    "second_layers": 11383,
+    "second_cpu_layers": 2585,
+    "second_swaps": 853,
+    "second_fills": 2790,
+    "second_dropped": 56,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "write"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 15.1,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3614.0,
+   "prompt_s": 11.2,
+   "gen_n": 740,
+   "decode_tps": 187.0,
+   "draft": [
+    590,
+    466
+   ],
+   "tiers": {
+    "main_swaps": 2526,
+    "main_fills": 788,
+    "main_dropped": 410,
+    "second_entries": 65542,
+    "second_experts": 52489,
+    "second_layers": 9358,
+    "second_cpu_layers": 1965,
+    "second_swaps": 1070,
+    "second_fills": 2670,
+    "second_dropped": 263,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash",
+    "Bash"
+   ],
+   "text": "The repo's test files still reference `GetStarred` \u2014 let me check the actual upstream Navidrome PR this corresponds to, and look at the remaining relevant files (migrations, controllers, mocks):"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 24.7,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4178.4,
+   "prompt_s": 21.6,
+   "gen_n": 550,
+   "decode_tps": 181.7,
+   "draft": [
+    416,
+    342
+   ],
+   "tiers": {
+    "main_swaps": 1030,
+    "main_fills": 841,
+    "main_dropped": 9,
+    "second_entries": 37140,
+    "second_experts": 31684,
+    "second_layers": 6439,
+    "second_cpu_layers": 2094,
+    "second_swaps": 503,
+    "second_fills": 2881,
+    "second_dropped": 23,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch explicitly updates are failing. To prove that my source changes pass the *patched* tests, I'll temporarily apply only the test hunks from the upstream diff, run the tests, and then revert the test files back to their original state:"
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 34.0,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4437.1,
+   "prompt_s": 32.9,
+   "gen_n": 148,
+   "decode_tps": 172.3,
+   "draft": [
+    144,
+    117
+   ],
+   "tiers": {
+    "main_swaps": 1042,
+    "main_fills": 888,
+    "main_dropped": 501,
+    "second_entries": 20984,
+    "second_experts": 15360,
+    "second_layers": 1437,
+    "second_cpu_layers": 55,
+    "second_swaps": 266,
+    "second_fills": 3101,
+    "second_dropped": 459,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 26
+}

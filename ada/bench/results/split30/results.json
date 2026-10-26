@@ -1,0 +1,231 @@
+{
+ "tag": "split30",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "1",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "30",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "py-small",
+   "wall_s": 10.3,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 3095.9,
+   "prompt_s": 7.1,
+   "gen_n": 578,
+   "decode_tps": 181.9,
+   "draft": [
+    485,
+    373
+   ],
+   "tiers": {
+    "main_swaps": 786,
+    "main_fills": 697,
+    "main_dropped": 180,
+    "second_entries": 34832,
+    "second_experts": 29691,
+    "second_layers": 5563,
+    "second_cpu_layers": 2238,
+    "second_swaps": 275,
+    "second_fills": 2373,
+    "second_dropped": 43,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "opencode-30k",
+   "wall_s": 16.6,
+   "error": null,
+   "prompt_n": 48621,
+   "cache_n": 0,
+   "prefill_tps": 4074.3,
+   "prompt_s": 11.9,
+   "gen_n": 901,
+   "decode_tps": 192.4,
+   "draft": [
+    750,
+    576
+   ],
+   "tiers": {
+    "main_swaps": 1802,
+    "main_fills": 890,
+    "main_dropped": 103,
+    "second_entries": 82268,
+    "second_experts": 70028,
+    "second_layers": 10628,
+    "second_cpu_layers": 2616,
+    "second_swaps": 705,
+    "second_fills": 2667,
+    "second_dropped": 87,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "write"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 14.7,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3632.5,
+   "prompt_s": 11.1,
+   "gen_n": 652,
+   "decode_tps": 184.3,
+   "draft": [
+    486,
+    394
+   ],
+   "tiers": {
+    "main_swaps": 1778,
+    "main_fills": 789,
+    "main_dropped": 124,
+    "second_entries": 50821,
+    "second_experts": 41140,
+    "second_layers": 7790,
+    "second_cpu_layers": 2273,
+    "second_swaps": 733,
+    "second_fills": 2544,
+    "second_dropped": 107,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "The test files in the repo still reference `GetStarred`, which is confusing. Let me check the actual upstream Navidrome PR this corresponds to, and look at the migrations and remaining callers:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 25.4,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4222.1,
+   "prompt_s": 21.3,
+   "gen_n": 727,
+   "decode_tps": 187.5,
+   "draft": [
+    591,
+    465
+   ],
+   "tiers": {
+    "main_swaps": 1577,
+    "main_fills": 844,
+    "main_dropped": 2,
+    "second_entries": 50360,
+    "second_experts": 42308,
+    "second_layers": 8222,
+    "second_cpu_layers": 2499,
+    "second_swaps": 682,
+    "second_fills": 2731,
+    "second_dropped": 63,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch updates are failing. To confirm that my source changes will pass the **patched** tests, I'll temporarily apply the upstream test-only hunks, run the tests, and then revert the test files back to their original state:"
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 34.3,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4387.3,
+   "prompt_s": 33.2,
+   "gen_n": 148,
+   "decode_tps": 181.4,
+   "draft": [
+    146,
+    117
+   ],
+   "tiers": {
+    "main_swaps": 1018,
+    "main_fills": 890,
+    "main_dropped": 294,
+    "second_entries": 21025,
+    "second_experts": 15612,
+    "second_layers": 1443,
+    "second_cpu_layers": 53,
+    "second_swaps": 266,
+    "second_fills": 2932,
+    "second_dropped": 267,
+    "second_empty_slots": 0,
+    "second_prefetched": 0,
+    "second_prefetch_used": 0,
+    "deterministic_adapt": 0
+   },
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 26
+}

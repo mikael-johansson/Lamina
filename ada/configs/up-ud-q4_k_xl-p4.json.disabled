@@ -1,0 +1,71 @@
+{
+ "exe": "/home/mikaeljo/git/strata/upstream/engine/strata",
+ "args": [
+  "--pack",
+  "/d/ssd_128/strata-upstream/packs/unsloth-ud-q4_k_xl",
+  "--native",
+  "/d/nvme_512/strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/upstream/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "auto",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--mtp",
+  "/d/ssd_128/strata-upstream/mtp/rt",
+  "--max-context",
+  "262144",
+  "--kv",
+  "int8",
+  "--kv-resident",
+  "32768"
+ ],
+ "cwd": "/home/mikaeljo/git/strata/upstream",
+ "tokenizer": "/d/ssd_128/strata-upstream/packs/unsloth-ud-q4_k_xl/tokenizer",
+ "model_name": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
+ "log": "/d/nvme_512/strata-data/logs/up-ud-q4_k_xl-p4.log",
+ "lib_dirs": [
+  "/home/mikaeljo/git/strata/upstream/.venv/lib/python3.14/site-packages/nvidia/cu13/lib"
+ ],
+ "port": 8095,
+ "env": {
+  "STRATA_HC_Q8": "1",
+  "STRATA_ROUTE_TAIL_SKIP": "0"
+ },
+ "gpu": [
+  0,
+  1
+ ],
+ "gpus_asked": true,
+ "layer_split": "auto",
+ "open_browser": false,
+ "args_written": [
+  "--pack",
+  "/d/ssd_128/strata-upstream/packs/unsloth-ud-q4_k_xl",
+  "--native",
+  "/d/nvme_512/strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/upstream/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "auto",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--mtp",
+  "/d/ssd_128/strata-upstream/mtp/rt",
+  "--max-context",
+  "262144",
+  "--kv",
+  "int8",
+  "--kv-resident",
+  "32768"
+ ],
+ "parallel": 4
+}
