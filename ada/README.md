@@ -153,19 +153,42 @@ second card (`STRATA_HOT_SPLIT`, -8..-17%), pre-armed second-card graphs (`STRAT
 Upstream (niko1221) on this box loses at every concurrency: single stream ~45% slower per row, and with
 `--batch-mtp` C=2 136-162 / C=4 151-170 tok/s total (one MTP proposal per slot is hard-coded).
 
-## Open directions
+## Open directions (updated 2026-10-26, evening)
+
+Done since the first version of this table: the decode layer split on 2 cards, up to 4 requests in flight with MTP
+each (paged K/V), the checkpoint-restore crash fix, the GPU kernel profile (`docs/KERNEL-PROFILE-2026-10-26.md`),
+`--spec 5` (no gain), the CPU pool found power-bound.  What is left, cheapest first within each group:
+
+**Settings / BIOS (no code)**
 
 | idea | expected | cost |
 | --- | --- | --- |
-| 5900X (a 5950X adds nothing: RAM-bound) | pool +30-45%: C=1 ~+2-3%, C=2 ~+12-20%, C=3/4 ~+15-25% (est.) | hardware |
-| CPU PBO (PPT 76 -> ~120 W) | the pool is power-bound (77 W at 4.0 GHz all-core, 4.65 one core): ~+5-8% at C=2-4, ~+1% C=1 | BIOS |
-| VRAM headroom | ~1 GB unused (551 MiB main with the default 700 MiB reserve, 427 MiB second): ~500 more experts | `--vram-reserve-mib`, test |
-| 4th RAM stick | 32 GB more room (Q4, more at once); no decode gain expected for IQ3_S (the pool is not RAM-bound) | hardware |
-| **3rd card + decode layer split in the fork** | C=1 ~+30-35% (all of IQ3_S in VRAM) | hardware + ~1 week |
-| two requests in flight on the layer split | C=2 up to ~1.5-1.7x total on 2 cards, MTP per request | ~1 more week |
-| batching in the fork (C>=2) | C=2 ~1.35x total short / ~1.2x at 40K; C=4 ~1.65x / ~1.35x | several days of engine work |
-| TP=2 | revised: C=1 ~+10-15% with today's misses; ~+25% over the layer split with all experts in VRAM | weeks |
-| 3rd card for Q4 | Q4 is CPU-miss-bound on 2 cards | hardware |
+| CPU PBO (PPT 76 -> ~120 W, CO -10) | pool ~+10-12%: C=2-4 ~+5-8%, C=1 ~+0.5-1% | BIOS, `docs/PBO-GUIDE-2026-10-26.md` (on hold) |
+| VRAM overclock (+500-1000 MHz GDDR6X) | the big streams (experts, mixer, head: ~60% of a window) are at the bandwidth limit: ~+3-6% C=1 and prefill | a NVML script run with sudo; memory-junction temperature to watch |
+| gpu-unlock (2x FP16/BF16 into FP32) | prefill on long prompts ~+8-15% (28% of its kernel time on that path); decode 0 | kernel module + boot parameter, reversible |
+| VRAM headroom | the reserves are worst-case peaks plus margin: maybe a few hundred MiB a card, ~150-250 experts, <1% hit rate | measure the peak under the heaviest requests, then lower `--vram-reserve-mib` |
+
+**Software**
+
+| idea | expected | cost |
+| --- | --- | --- |
+| CPU pool on the SMT siblings too (14 threads on the pool's 7 cores) | kbench: +5-7% per kernel under the power limit -> pool ~+5%: C>=2 ~+2-4% | a switch in `pool.cpp` (one worker a core today) + server A/B |
+| overlap / shrink MTP drafting | drafting is 0.9 ms of a 14.5 ms window, serial: C=1 up to ~+3-5% | 1-3 days |
+| per-card adaptive expert tier on the split | the split runs on the fixed learned profile; production's tier follows a conversation: long conversations a few % | 1-2 days |
+| short-prompt prefill on the split | prompts <=13K read 15-30% slower split (the second card streams experts it lacks): copy them ahead | 1-2 days |
+| CPU kernels: per-format decode choice on Zen 3 | the gathered IQ3_S decode +22% for 2-token rows; the pool's experts get ~1.1 tokens: <1% | hours |
+| CPU kernels: a cheaper lossless layout (e.g. IQ2_S indices pre-expanded) | fewer uops a weight helps while power-bound; costs RAM bytes (the pool has ~25% RAM headroom); unknown, maybe +5-15% pool | days, speculative |
+| rows of several requests in one window (C>=3) | MoE rows rarely share experts (~1.4 rows an expert): C=3/4 ~+15-30% | a week+ |
+| fusing the GPU's small kernels | tried for the HC read: bitwise equal but slower on Ampere (no programmatic dependent launch) | not pursued |
+
+**Hardware**
+
+| idea | expected | cost |
+| --- | --- | --- |
+| **3rd 3090 (3-stage split)** | most of IQ3_S in VRAM: C=1 ~+20-25%, C=2 ~+25-45%, short-prompt prefill fixed | riser (PCIe 4.0 x4) + ~1 week (N-stage split) |
+| 5900X (a 5950X adds nothing: RAM-bound) | pool +30-45%: C=1 ~+2-3%, C=2 ~+12-20%, C=3/4 ~+15-25% | CPU |
+| 4th RAM stick | room (Q4, more requests); no decode gain (the pool already reads dual-channel memory only) | stick |
+| TP=2 | ~+25% over the layer split only with all experts in VRAM | weeks |
 
 Multi-GPU findings and the plan (TP verdict, upstream's layer split measured, layer split + concurrency):
 `docs/MULTI-GPU-PLAN-2026-10-26.md`. Batching designs and the measured cost model: `docs/OVERNIGHT-2026-10-26.md`. MoE batching scales worse than the dense 27B

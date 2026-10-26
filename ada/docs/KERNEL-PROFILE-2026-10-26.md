@@ -152,3 +152,16 @@ less still.  Order: PBO first (free; it also shows how the pool scales with cloc
 before the 3rd card, not a 5950X.
 
 Status: PBO and the CPU swap are on hold (no physical access for now); the guide is `PBO-GUIDE-2026-10-26.md`.
+
+## SMT under the power limit
+
+`kbench` with 14 threads, the pool's 7 cores (1-7) and their siblings (9-15), against 7 threads on the same cores,
+weights in L3: IQ2_S gate/up 28.3 -> 30.4 GB/s (+7%), IQ3_XXS 26.3 -> 27.8 (+6%), IQ3_S 26.6 -> 28.3 (+6%), IQ4_NL down
+68.6 -> 72.0 (+5%), Q2_0 down 40.8 -> 43.9 (+7%).  The second hardware thread fills the core's stalls for the same
+watts.  The engine pins one worker a physical core (`pool.cpp`); adding the siblings is a small switch, then a
+server A/B at C=1/C=2 (the per-layer sync of 13 workers instead of 6 may eat part of it).  Not tried yet.
+
+Are the CPU kernels optimal?  Not provably.  They are the fork author's tuned multi-token AVX2 kernels (codebook
+decoded once per 32 values for every token, ggml's sign tricks, gathered variants per CPU); two rearrangements here
+gained nothing while power-bound.  What is left for them: SMT (above), PBO (more watts), the per-format gather choice
+on Zen 3 (<1%), and a cheaper lossless layout of the CPU experts (fewer uops a weight, more bytes; speculative).

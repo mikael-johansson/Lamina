@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     const double secs = argc > 1 ? atof(argv[1]) : 0.4;
     const Case cases[] = {{"IQ2_S gate/up", 22, 20}, {"IQ3_XXS gate/up", 18, 20}, {"IQ3_S gate/up", 21, 20},
                           {"IQ4_NL down", 21, 20}, {"Q2_0 down", 21, 42}};
-    const int threads_list[] = {1, 2, 4, 6, 7, 8};
+    const int threads_list[] = {1, 2, 4, 6, 7, 8, 14, 16};   // 14: the pool's 7 cores with their SMT siblings
     const size_t stream_bytes = 6ull << 30;   // far past the 32 MB L3
     std::vector<uint8_t> big(stream_bytes);
     std::mt19937_64 rng(1);
@@ -60,7 +60,9 @@ int main(int argc, char** argv) {
                     std::vector<std::thread> th;
                     for (int t = 0; t < T; ++t)
                         th.emplace_back([&, t] {
-                            pin(t);   // logical 0-7 are eight physical cores (siblings are i, i+8)
+                            // logical 0-7 are eight physical cores (siblings are i, i+8); 14 threads: cores 1-7 and
+                            // their siblings 9-15 (the pool's cores), 16: all
+                            pin(T == 14 ? 1 + t % 7 + 8 * (t / 7) : t);
                             std::vector<float> x(H), h(FF);
                             for (auto& v : x) v = (float) ((rng() % 2001) - 1000) / 1000.f;
                             for (auto& v : h) v = (float) ((t * 7 + 3) % 11) / 10.f;
