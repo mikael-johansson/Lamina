@@ -4798,6 +4798,12 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
+            if (admit >= 0 && n + 8192 > slot_cells) {   // its sessions would not hold it (STRATA_SLOT_CELLS)
+                std::printf("ERR BGEN: a conversation of %lld tokens is longer than a batch slot holds (%lld with 8192 to "
+                            "generate)\n", (long long) n, (long long) slot_cells);
+                std::fflush(stdout);
+                continue;
+            }
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
