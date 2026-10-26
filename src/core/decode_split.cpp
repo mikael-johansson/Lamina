@@ -187,6 +187,23 @@ bool DecodeSplit::copy_state(int64_t c0, int64_t c1, bool in, std::string& err) 
 
 bool DecodeSplit::copy_in(int64_t cells, std::string& err) { return copy_state(0, cells, true, err); }
 
+bool DecodeSplit::save(int64_t pos, void* host) {
+    OnDevice on(dev_);
+    return session_ckpt_save_layers(ss2_, *g_, pos, host, nullptr, at_, g_->n_layers, at_);
+}
+
+bool DecodeSplit::load(int64_t pos, const void* host) {
+    OnDevice on(dev_);
+    return session_ckpt_load_layers(ss2_, *g_, pos, host, nullptr, at_, g_->n_layers, at_);
+}
+
+void DecodeSplit::zero() {
+    OnDevice on(dev_);
+    cudaMemset(ss2_.gdn_state, 0, (size_t) gdn_count_ * gdn_state_floats(*g_) * 4);
+    for (const QsaState& q : qsa2_) qsa_state_zero(q, *g_, nullptr);
+    cudaDeviceSynchronize();
+}
+
 bool DecodeSplit::copy_out(int64_t c0, int64_t c1, std::string& err) { return copy_state(c0, c1, false, err); }
 
 }  // namespace strata::core

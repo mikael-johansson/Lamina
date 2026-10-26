@@ -824,6 +824,67 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const fl
         }
 }
 
+/// --decode-split (core/decode_split.hpp): a verify window in its two stages, `a` on the main GPU and `b` on its own
+/// (`dev_b`); with `b` null, the one window.  The pool serves each stage's layers with that stage's residency, and the
+/// head's calls go to the stage that runs it.
+struct Stages {
+    strata::core::Verifier* a = nullptr;
+    strata::core::Verifier* b = nullptr;
+    int dev_a = 0, dev_b = -1;
+    Drive* drive = nullptr;
+    int64_t row_floats = 0;   // hc * n_embd: one token's rows
+
+    strata::core::Verifier& head() { return b != nullptr ? *b : *a; }
+    bool run(int T, const int32_t* tokens, int64_t pos0, int32_t* out, std::string& err) {
+        if (!a->run(T, tokens, pos0, &drive_pool_multi, drive, out, err)) return false;
+        if (b == nullptr || drive->d.failed) return true;
+        auto* const plan1 = drive->d.plan;
+        const int32_t* const res1 = drive->d.host_res;
+        drive->d.plan = b->plan_sink();
+        drive->d.host_res = b->residency();
+        cudaSetDevice(dev_b);
+        const bool ok = b->run(T, tokens, pos0, &drive_pool_multi, drive, out, err);
+        cudaSetDevice(dev_a);
+        drive->d.plan = plan1;
+        drive->d.host_res = res1;
+        if (!ok) return false;
+        // the drafter reads the window's last rows from the first stage's buffer
+        if (cudaMemcpy((void*) a->final_R_all(), b->final_R_host(), (size_t) T * (size_t) row_floats * sizeof(float),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = std::string("--decode-split: the rows back: ") + cudaGetErrorString(cudaGetLastError());
+            return false;
+        }
+        return true;
+    }
+    int nonfinite(int T) { return head().nonfinite(T); }
+    bool commit(int n_keep, std::string& err, bool wait) {
+        if (!a->commit(n_keep, err, wait)) return false;
+        if (b == nullptr) return true;
+        cudaSetDevice(dev_b);
+        const bool ok = b->commit(n_keep, err, true);
+        cudaSetDevice(dev_a);
+        return ok;
+    }
+    bool wait_commit(std::string& err) { return a->wait_commit(err); }
+    void ple_ahead(int t, int32_t token) { a->ple_ahead(t, token); }
+    void set_sampling(const strata::kernels::SamplerParams& sp) { head().set_sampling(sp); }
+    void set_history(const int32_t* history, int len) { head().set_history(history, len); }
+    bool copy_logits(int T, float* out, std::string& err) {
+        if (b == nullptr) return a->copy_logits(T, out, err);
+        cudaSetDevice(dev_b);
+        const bool ok = b->copy_logits(T, out, err);
+        cudaSetDevice(dev_a);
+        return ok;
+    }
+    bool candidate_logprobs(const int32_t* cand, int n, float* out, std::string& err) {
+        if (b == nullptr) return a->candidate_logprobs(cand, n, out, err);
+        cudaSetDevice(dev_b);
+        const bool ok = b->candidate_logprobs(cand, n, out, err);
+        cudaSetDevice(dev_a);
+        return ok;
+    }
+};
+
 /// STRATA_TRACE=1: the VRAM left at a step of the startup (finds what fills the card after the cache is sized).
 /// STRATA_TRACE=2 also waits for the device at each mark and names the first step after which it reports an error:
 /// a sticky failure that surfaces in a later, unrelated call is pinned to the step that ran the faulting work.
@@ -1416,8 +1477,8 @@ int main(int argc, char** argv) {
     // --decode-split: each GPU's tier holds its own layers' experts, the whole head is on each, and the tiers stay as
     // the profile filled them (an adaptive tier would move experts of either GPU's layers anywhere)
     if (o.decode_split > 0) {
-        if (o.second_gpu < 0 || o.spec < 2 || o.serve) {
-            std::fprintf(stderr, "strata generate: --decode-split needs --second-gpu and --spec, and runs direct decode only\n");
+        if (o.second_gpu < 0 || o.spec < 2) {
+            std::fprintf(stderr, "strata generate: --decode-split needs --second-gpu and --spec\n");
             return 2;
         }
         o.head_split = 0.0;
@@ -3284,6 +3345,35 @@ int main(int argc, char** argv) {
             host_res2.clear();
         }
     }
+    // --decode-split: the first stage's layers (before its `init`), and the second stage's window on its GPU, its tier the
+    // second GPU's cache; returns the second (null: no split), with `ver` the first
+    auto split_stages = [&](strata::core::Verifier& ver) { if (o.decode_split > 0 && dsplit.at() > 0) ver.set_layers(0, dsplit.at()); };
+    auto init_stage2 = [&](strata::core::Verifier& ver, bool profile, std::string& e) -> strata::core::Verifier* {
+        if (o.decode_split <= 0 || dsplit.at() <= 0) return nullptr;
+        strata::core::Verifier* v2 = &dsplit.verifier();
+        static std::vector<int32_t> no_res;   // STRATA_DSPLIT_NOHIT (a test): every routed expert on the CPU
+        if (std::getenv("STRATA_DSPLIT_NOHIT") != nullptr)
+            no_res.assign((size_t) (g.n_layers * g.n_expert), strata::core::kNotResident);
+        strata::core::VerifyHits vh2;
+        vh2.res = no_res.empty() ? host_res2.data() : no_res.data();
+        vh2.cache_base = gpu2.cache().device_slot(0);
+        vh2.slot_off = gpu2.cache().slot_offsets();
+        vh2.slots = gpu2.cache().slots();
+        vh2.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+        ver.set_host_rows(true);   // the rows the second stage reads (its input; set before the first window)
+        cudaSetDevice(dsplit.device());
+        v2->set_layers(dsplit.at(), g.n_layers);
+        v2->set_input_rows(ver.final_R_host());
+        v2->set_host_rows(true);
+        v2->set_profile(profile);
+        v2->set_pcie_share(false);
+        // (the prompt ran its layers from the split on in the second GPU's session already: set_resident)
+        const bool ok = v2->init(dsplit.weights(), g, dsplit.session(), vh2, &dsplit.head(), o.max_window(), e);
+        cudaSetDevice(o.main_gpu);
+        if (!ok) { e = "--decode-split: " + e; return nullptr; }
+        drive.d.gpu2 = nullptr;   // the second GPU's tier is the second stage's own
+        return v2;
+    };
     // The largest loan the main GPU's prompt path can take: its buffers for the longest chunk with a whole layer
     // streamed (the prefetch area grows with the experts the cache does not hold).  The elastic K/V stays below it.
     auto worst_loan = [&](bool off) {
@@ -3867,11 +3957,18 @@ int main(int argc, char** argv) {
         vh.slots = xcache.slots();
         vh.blob = thits.blob;
         ver.set_split_head(split_head.get());
+        split_stages(ver);
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.max_window(), err) ||
             !mtp.bind(wt, &native_head, ver.final_R_all(), err)) {
             std::fprintf(stderr, "strata serve: %s\n", err.c_str());
             return 1;
         }
+        strata::core::Verifier* ver2 = init_stage2(ver, o.window_profile, err);
+        if (o.decode_split > 0 && ver2 == nullptr) {
+            std::fprintf(stderr, "strata serve: %s\n", err.c_str());
+            return 1;
+        }
+        Stages st{&ver, ver2, o.main_gpu, ver2 != nullptr ? dsplit.device() : -1, &drive, g.hc * g.n_embd};
         mem_mark("the verifier and the drafter's binding");
         ver.set_split(o.spec_split);
         ver.set_profile(o.window_profile);
@@ -3925,10 +4022,30 @@ int main(int argc, char** argv) {
             profile_dirty = false;
         };
         // ---- the prompt cache (strata/core/prompt_cache.hpp)
+        // (--decode-split: the QSA layers from the split on are the second session's, on its GPU)
         std::vector<strata::core::QsaState*> kv_states;
-        for (int64_t i = 0; i < g.n_qsa_layers(); ++i) kv_states.push_back(&ss.qsa_states[i]);
+        std::vector<int> kv_dev;
+        for (int64_t l = 0, i = 0, i2 = 0; l < g.n_layers; ++l) {
+            if (!strata::core::is_qsa_layer(g, l)) continue;
+            if (ver2 != nullptr && l >= dsplit.at()) {
+                kv_states.push_back(&dsplit.session().qsa_states[i2++]);
+                kv_dev.push_back(dsplit.device());
+            } else {
+                kv_states.push_back(&ss.qsa_states[i]);
+                kv_dev.push_back(-1);
+            }
+            ++i;
+        }
         kv_states.push_back(&mtp.kv_state());
+        kv_dev.push_back(-1);
         strata::core::PromptCache pcache(g, ss, kv_states, main_cs, o.prompt_cache, (uint64_t) o.cache_ram_mib << 20);
+        if (ver2 != nullptr) {
+            pcache.kv_device = kv_dev;
+            pcache.second_from = dsplit.at();
+            pcache.second_save = [&](int64_t pos, void* host) { return dsplit.save(pos, host); };
+            pcache.second_load = [&](int64_t pos, const void* host) { return dsplit.load(pos, host); };
+            pcache.second_zero = [&] { dsplit.zero(); };
+        }
         // the elastic K/V: a stashed sequence's restore (or the live one's stash) copies all its cells
         if (kvg.on) pcache.ensure_kv = [&](int64_t cells) { return kvg_ensure(cells + 256); };
         if (pcache.enabled())
@@ -4336,9 +4453,9 @@ int main(int argc, char** argv) {
             req_sp.penalty_repeat = req_penalty_repeat;
             req_sp.penalty_freq = req_penalty_freq;
             req_sp.penalty_present = req_penalty_present;
-            ver.set_sampling(req_sp);
+            st.set_sampling(req_sp);
             const int hist_n = std::min(req_sp.penalty_last_n, kPenaltyWindowCap);
-            ver.set_history(hist_n > 0 ? d_hist : nullptr, hist_n);
+            st.set_history(hist_n > 0 ? d_hist : nullptr, hist_n);
             req_tiers = tier_counters();
             const Clock::time_point r0 = Clock::now();
             auto report = [&](const std::string& e) {   // a failed request: the engine exits after it
@@ -4496,15 +4613,15 @@ int main(int argc, char** argv) {
                     drive.d.failed = false;
                     drive.adapt_next = drive.flush_next = false;
                     drive_window(&drive, T);
-                    if (!ver.run(T, window.data(), j, &drive_pool_multi, &drive, outv.data(), err) || drive.d.failed) {
+                    if (!st.run(T, window.data(), j, outv.data(), err) || drive.d.failed) {
                         if (drive.d.failed && drive.d.fail) err = drive.d.fail;
                         return false;
                     }
-                    if (const int r = ver.nonfinite(T); r >= 0) {
+                    if (const int r = st.nonfinite(T); r >= 0) {
                         poison_at = j + r;
                         return true;
                     }
-                    if (!ver.commit(T, err, false)) return false;   // beside the draft
+                    if (!st.commit(T, err, false)) return false;   // beside the draft
                     for (int i = 0; i < T; ++i) outv[(size_t) i] = (int32_t) ids[(size_t) (j + i + 1)];
                     if (!mtp.draft(T, outv.data(), j, T - 1, drafts.data(), err, dprob.data(), (float) o.spec_min_p) ||
                         !ver.wait_commit(err))
@@ -4628,12 +4745,12 @@ int main(int argc, char** argv) {
                 tr("window", p, T);
                 drive.adapt_next = !drive.d.usage.empty() && ((rounds + 1) % o.adapt_every) == 0;
                 drive.flush_next = !drive.d.usage.empty() && ((rounds + 2) % o.adapt_every) == 0;
-                if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err) || drive.d.failed) {
+                if (!st.run(T, window.data(), p, outv.data(), err) || drive.d.failed) {
                     drive.join_adapt();
                     report(drive.d.failed && drive.d.fail ? drive.d.fail : err);
                     return 1;
                 }
-                if (const int r = ver.nonfinite(T); r >= 0) {
+                if (const int r = st.nonfinite(T); r >= 0) {
                     drive.join_adapt();
                     poison_at = p + r;
                     finish = "nonfinite";
@@ -4645,7 +4762,7 @@ int main(int argc, char** argv) {
                 if (first_window && !req_score.empty()) {
                     std::vector<float> lp(req_score.size());
                     std::printf("LP");
-                    if (ver.candidate_logprobs(req_score.data(), (int) req_score.size(), lp.data(), err))
+                    if (st.candidate_logprobs(req_score.data(), (int) req_score.size(), lp.data(), err))
                         for (size_t i = 0; i < req_score.size(); ++i)
                             std::printf(" %d:%.6g", (int) req_score[i], lp[i]);
                     else
@@ -4656,7 +4773,7 @@ int main(int argc, char** argv) {
                 const bool fw = first_window;
                 int a = fw ? T - 1 : 0;   // the first window's prompt tokens are all committed
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
-                if (!ver.commit(a + 1, err, false)) {   // beside the draft
+                if (!st.commit(a + 1, err, false)) {   // beside the draft
                     drive.join_adapt();
                     report(err);
                     return 1;
@@ -4701,7 +4818,7 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 if (ddump.on()) {   // the window's committed positions: rows, logits, and the drafts made after them
-                    if (!ver.copy_logits(a + 1, dd_logits.data(), err)) { report(err); return 1; }
+                    if (!st.copy_logits(a + 1, dd_logits.data(), err)) { report(err); return 1; }
                     ddump.put_rows(ver.final_R_all(), a + 1, g.hc * g.n_embd);
                     for (int i = 0; i <= a; ++i)
                         ddump.put_meta((int32_t) (p + i), window[(size_t) i], outv[(size_t) i],
@@ -5134,40 +5251,22 @@ int main(int argc, char** argv) {
             drive.d.gpu2 = nullptr;
         }
         if (dsplit_on) {
-            if (!o.window_logits.empty() || o.spec_split) {
-                std::fprintf(stderr, "strata generate: --decode-split: no --window-logits or --spec-split\n");
+            if (o.spec_split) {
+                std::fprintf(stderr, "strata generate: --decode-split: no --spec-split\n");
                 return 2;
             }
-            ver.set_layers(0, dsplit.at());
+            split_stages(ver);
         }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.max_window(), err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
-        // --decode-split: the second stage's window on its GPU, its tier the second GPU's cache
-        strata::core::Verifier* ver2 = dsplit_on ? &dsplit.verifier() : nullptr;
-        if (ver2 != nullptr) {
-            strata::core::VerifyHits vh2;
-            vh2.res = no_res.empty() ? host_res2.data() : no_res.data();
-            vh2.cache_base = gpu2.cache().device_slot(0);
-            vh2.slot_off = gpu2.cache().slot_offsets();
-            vh2.slots = gpu2.cache().slots();
-            vh2.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
-            cudaSetDevice(dsplit.device());
-            ver2->set_layers(dsplit.at(), g.n_layers);
-            ver2->set_input_rows(ver.final_R_host());
-            ver2->set_host_rows(true);
-            ver2->set_profile(o.window_profile);
-            ver2->set_pcie_share(false);
-            // (the prompt ran its layers from the split on in the second GPU's session already: set_resident)
-            const bool ok2 = ver2->init(dsplit.weights(), g, dsplit.session(), vh2, &dsplit.head(), o.max_window(), err);
-            cudaSetDevice(o.main_gpu);
-            if (!ok2) {
-                std::fprintf(stderr, "strata generate: --decode-split: %s\n", err.c_str());
-                return 1;
-            }
-            drive.d.gpu2 = nullptr;   // the second GPU's tier is the second stage's own
+        strata::core::Verifier* ver2 = dsplit_on ? init_stage2(ver, o.window_profile, err) : nullptr;
+        if (dsplit_on && ver2 == nullptr) {
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
         }
+        Stages st{&ver, ver2, o.main_gpu, dsplit_on ? dsplit.device() : -1, &drive, g.hc * g.n_embd};
         const bool use_mtp = !o.mtp.empty();
         if (use_mtp && !mtp.bind(wt, &native_head, ver.final_R_all(), err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
@@ -5285,30 +5384,10 @@ int main(int argc, char** argv) {
             drive_window(&drive, T);
             drive.adapt_next = !drive.d.usage.empty() && ((rounds + 1) % o.adapt_every) == 0;
             drive.flush_next = !drive.d.usage.empty() && ((rounds + 2) % o.adapt_every) == 0;
-            if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
+            if (!st.run(T, window.data(), p, outv.data(), err)) {
                 drive.join_adapt();
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
-            }
-            if (ver2 != nullptr && !drive.d.failed) {   // the layers from the split on and the head, on the second GPU
-                const auto plan1 = drive.d.plan;
-                const int32_t* res1 = drive.d.host_res;
-                drive.d.plan = ver2->plan_sink();
-                drive.d.host_res = ver2->residency();
-                cudaSetDevice(dsplit.device());
-                const bool ok2 = ver2->run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err);
-                cudaSetDevice(o.main_gpu);
-                drive.d.plan = plan1;
-                drive.d.host_res = res1;
-                // the drafter reads the window's last rows from the first stage's buffer
-                if (ok2 && cudaMemcpy((void*) ver.final_R_all(), ver2->final_R_host(),
-                                      (size_t) T * (size_t) (g.hc * g.n_embd) * sizeof(float),
-                                      cudaMemcpyHostToDevice) != cudaSuccess)
-                    err = std::string("--decode-split: the rows back: ") + cudaGetErrorString(cudaGetLastError());
-                if (!ok2 || !err.empty()) {
-                    std::fprintf(stderr, "strata generate: %s\n", err.c_str());
-                    return 1;
-                }
             }
             if (drive.d.failed) {
                 drive.join_adapt();
@@ -5317,7 +5396,7 @@ int main(int argc, char** argv) {
                              drive.d.fail ? drive.d.fail : "(no message)");
                 return 1;
             }
-            if (wlog != nullptr && !ver.copy_logits(T, wl.data(), err)) {
+            if (wlog != nullptr && !st.copy_logits(T, wl.data(), err)) {
                 drive.join_adapt();
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
@@ -5349,19 +5428,10 @@ int main(int argc, char** argv) {
                 first_window = false;
                 ttft_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_start).count();
             }
-            if (!ver.commit(a + 1, err, false)) {   // beside the draft
+            if (!st.commit(a + 1, err, false)) {   // beside the draft
                 drive.join_adapt();
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
-            }
-            if (ver2 != nullptr) {
-                cudaSetDevice(dsplit.device());
-                const bool ok2 = ver2->commit(a + 1, err, true);
-                cudaSetDevice(o.main_gpu);
-                if (!ok2) {
-                    std::fprintf(stderr, "strata generate: %s\n", err.c_str());
-                    return 1;
-                }
             }
             ver.ple_ahead(0, outv[(size_t) a]);
             ++rounds;

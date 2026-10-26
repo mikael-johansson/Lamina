@@ -77,6 +77,14 @@ public:
     /// prompt's end waits for that).  0: not split.
     int64_t split_from = 0;
     std::function<void(int64_t pos, void* host)> split_save;
+    /// --decode-split (core/decode_split.hpp): the layers from `second_from` on live in another session, on another
+    /// GPU: a checkpoint saves them through `second_save` (unless a split prompt path's stage does: split_save), a
+    /// restore loads them through `second_load`, a fresh sequence zeroes them through `second_zero`.  0: one session.
+    int64_t second_from = 0;
+    std::function<bool(int64_t pos, void* host)> second_save, second_load;
+    std::function<void()> second_zero;
+    /// The device each of `kv`'s states is on, for those not on the stream's (-1, or past its end: the stream's).
+    std::vector<int> kv_device;
     /// Cells the live sequence holds (a later stash reads all of them).
     int64_t live_cells() const { return (int64_t) live_.tokens.size(); }
     uint64_t ckpt_bytes() const { return ckpt_bytes_; }
@@ -118,7 +126,7 @@ private:
     };
 
     /// One device region of the K/V cells, stored back to back in a stashed sequence's buffer.
-    struct Part { void* dev; uint64_t bytes; };
+    struct Part { void* dev; uint64_t bytes; int device = -1; };
 
     /// Cells of `seq` a prompt can continue from: the whole sequence when it is a prefix of the prompt (live
     /// only: the state is there), else its best checkpoint within the common prefix (its position; -1: none).

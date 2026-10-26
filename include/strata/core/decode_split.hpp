@@ -50,6 +50,11 @@ public:
     bool copy_in(int64_t cells, std::string& err);
     /// The other way, for the cells [c0, c1) this GPU appended since: the main session then holds every layer again.
     bool copy_out(int64_t c0, int64_t c1, std::string& err);
+    /// The prompt cache's part (core/prompt_cache.hpp): the layers here of a checkpoint at `pos` to or from `host`, and
+    /// a fresh sequence's zeroed state.
+    bool save(int64_t pos, void* host);
+    bool load(int64_t pos, const void* host);
+    void zero();
 
 private:
     bool copy_state(int64_t c0, int64_t c1, bool in, std::string& err);

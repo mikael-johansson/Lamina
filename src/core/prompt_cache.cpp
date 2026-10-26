@@ -140,12 +140,14 @@ std::vector<PromptCache::Part> PromptCache::kv_parts(int64_t cells) const {
     const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
     const uint64_t row = (uint64_t) g_.idx_key_dim * sizeof(float);
     std::vector<Part> parts;
-    for (QsaState* st : kv_) {
+    for (size_t i = 0; i < kv_.size(); ++i) {
+        const QsaState* st = kv_[i];
+        const int dev = i < kv_device.size() ? kv_device[i] : -1;
         const uint64_t pages = (uint64_t) std::min<int64_t>(st->n_pages, (cells + sh.page_size - 1) / sh.page_size);
         const uint64_t c = pages * (uint64_t) g_.n_head_kv * (uint64_t) sh.page_size;
-        for (const KvArray& a : qsa_kv_arrays(*st, g_)) parts.push_back({a.data, c * a.row_bytes});
+        for (const KvArray& a : qsa_kv_arrays(*st, g_)) parts.push_back({a.data, c * a.row_bytes, dev});
         const int64_t rows = std::min<int64_t>(cells / sh.idx_block + 2, st->max_cells / sh.idx_block + 2);
-        parts.push_back({st->idx_pooled, (uint64_t) rows * row});
+        parts.push_back({st->idx_pooled, (uint64_t) rows * row, dev});
     }
     return parts;
 }
@@ -155,8 +157,18 @@ bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_ho
     const std::vector<Part> parts = kv_parts(cells), layout = kv_parts(held);
     for (size_t i = 0; i < parts.size(); ++i) {
         const Part& p = parts[i];
-        const cudaError_t e = to_host ? cudaMemcpyAsync(host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs)
-                                      : cudaMemcpyAsync(p.dev, host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs);
+        cudaError_t e = cudaSuccess;
+        if (p.device >= 0) {   // another GPU's state (kv_device): a plain copy with that GPU current
+            int cur = 0;
+            cudaGetDevice(&cur);
+            cudaSetDevice(p.device);
+            e = to_host ? cudaMemcpy(host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost)
+                        : cudaMemcpy(p.dev, host, (size_t) p.bytes, cudaMemcpyHostToDevice);
+            cudaSetDevice(cur);
+        } else {
+            e = to_host ? cudaMemcpyAsync(host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs)
+                        : cudaMemcpyAsync(p.dev, host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs);
+        }
         if (e != cudaSuccess) return session_copy_failed(stream_);
         host += layout[i].bytes;
     }
@@ -210,7 +222,8 @@ bool PromptCache::restore(Seq& seq, int64_t pos, bool prefix) {
     if (seq.kv && ensure_kv && !ensure_kv(cells)) return false;
     if (seq.kv && !kv_copy(cells, seq.kv_cells, seq.kv.get(), false)) return false;
     ck->stamp = ++clock_;
-    return session_ckpt_load(ss_, g_, pos, ck->host, stream_);
+    return session_ckpt_load(ss_, g_, pos, ck->host, stream_) &&
+           (second_from <= 0 || !second_load || second_load(pos, ck->host));
 }
 
 int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs) {
@@ -221,6 +234,7 @@ int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<Im
         live_.imgs.clear();
         session_zero(ss_, g_, nullptr, stream_);
         cudaStreamSynchronize((cudaStream_t) stream_);
+        if (second_from > 0 && second_zero) second_zero();
         return 0;
     };
     if (!enabled()) return zero();
@@ -310,8 +324,10 @@ void PromptCache::checkpoint(int64_t pos) {
     if (h == nullptr) return;
     cudaDeviceSynchronize();
     const bool split = split_from > 0 && split_save;
-    if (!(split ? session_ckpt_save_layers(ss_, g_, pos, h, stream_, 0, split_from, 0)
-                : session_ckpt_save(ss_, g_, pos, h, stream_))) {
+    const int64_t here = split ? split_from : second_from > 0 ? second_from : g_.n_layers;   // this session's layers
+    if (!(here < g_.n_layers ? session_ckpt_save_layers(ss_, g_, pos, h, stream_, 0, here, 0)
+                             : session_ckpt_save(ss_, g_, pos, h, stream_)) ||
+        (!split && second_from > 0 && second_save && !second_save(pos, h))) {
         free_.push_back(h);
         return;
     }
