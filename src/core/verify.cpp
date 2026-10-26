@@ -181,6 +181,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     const WeightRef* wo = wt.find("output.weight");
     if (wo == nullptr) { err = "verify: output.weight is missing"; return false; }
     n_vocab_ = wo->ne1;
+    if (l1_ < 0) l1_ = g.n_layers;
+    if (l0_ < 0 || l0_ >= l1_ || l1_ > g.n_layers || (l0_ > 0 && in_host_ == nullptr) || (l0_ > 0 && l0_ < 2)) {
+        err = "verify: a layer range needs 0 or 2.. as its first layer, and the stage before it's rows";
+        return false;
+    }
+    gdn_first_ = qsa_first_ = 0;
+    for (int64_t l = 0; l < l0_; ++l) ++(is_qsa_layer(g, l) ? qsa_first_ : gdn_first_);
 
     const strata::kernels::QsaShapes s = shapes_of(g);
     cap_ = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
@@ -234,8 +241,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(2 * T * K * 4, (void**) &h_pw_, (void**) &m_pw_) &&
               mapped(64, (void**) &h_pseq_, (void**) &m_pseq_) &&
               mapped(64, (void**) &h_pleflag_, (void**) &m_pleflag_) &&
-              mapped(T * HC * N * 4, (void**) &h_rows_, (void**) &m_rows_);
+              // the final rows, then for a later stage the last layer's FFN output and injection (its first read folds
+              // them in, as the layer after them does in one window)
+              mapped((T * HC * N + T * N + T * HC) * 4, (void**) &h_rows_, (void**) &m_rows_, portable);
     if (!ok) { err = "verify: mapped staging allocation failed"; return false; }
+    if (in_host_ != nullptr && cudaHostGetDevicePointer((void**) &m_in_, (void*) in_host_, 0) != cudaSuccess) {
+        err = "verify: the stage before's rows are not mapped here";
+        return false;
+    }
     // A plan block, one per token group: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) |
     // ptr2(cap u64) | start2(cap+1).  The main GPU's hits (`verify_hit_plan`, device) fill counts [groups, entries],
     // start, dst, tok and ptr; the pool's PCIe share (mapped, `sink_`) counts [-, entries, groups], dst, tok, ptr2 and
@@ -428,7 +441,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
     const int64_t HS = (int64_t) NG_HIST * NG_HC_DIM;
     const int64_t TS = (s.idx_block - 1) * ID;
-    const bool ple_on = ss.ple.ready();
+    const bool ple_on = ss.ple.ready() && l0_ <= 1 && l1_ > 1;
     auto Rt = [&](int t) { return R_ + (size_t) t * HC * N; };
     const int G = (split_ && T >= 2) ? 2 : 1;
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
@@ -493,8 +506,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (!mark(ples_, plejoin_)) return false;
     }
 
-    // ---- the embeddings, broadcast to the hc streams
-    if (const NativeEmbed* ne = native_embed()) {       // plan v0.3 P6: the GGUF-form table
+    // ---- the embeddings, broadcast to the hc streams; a later stage's input, the rows the stage before wrote
+    if (l0_ > 0) {
+        copy_from_mapped(R_, m_in_, (int64_t) T * HC * N, cs);
+        copy_from_mapped(bo_, m_in_ + (size_t) MT * HC * N, (int64_t) T * N, cs);
+        copy_from_mapped(inj2_, m_in_ + (size_t) MT * HC * N + (size_t) MT * N, (int64_t) T * HC, cs);
+    } else if (const NativeEmbed* ne = native_embed()) {       // plan v0.3 P6: the GGUF-form table
         ne->gather_dev(tok_, T, emb_, cs);
         broadcast_streams(emb_, R_, N, (int) HC, T, cs);
     } else {
@@ -518,7 +535,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // router runs on it with that layer's logit bias.  When learning, the FFN read of a layer the previous one
     // predicts keeps its gates' average, and the layer corrects its bias by its own logits on that branch.
     auto predicts = [&](int64_t l) {
-        return predict_ != nullptr && G == 1 && l + 1 < g.n_layers && native_router_enabled();
+        return predict_ != nullptr && G == 1 && l + 1 < l1_ && native_router_enabled();
     };
     auto corrects = [&](int64_t l) { return learn_ && l > 0 && predicts(l - 1); };
     auto branches = [&](int64_t l) { return predicts(l) || corrects(l); };
@@ -527,9 +544,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     std::vector<int64_t> gdn_idx((size_t) g.n_layers, -1), qsa_idx((size_t) g.n_layers, -1);
     {
         int64_t qi = 0, gi = 0;
-        for (int64_t l = 0; l < g.n_layers; ++l) {
-            if (is_qsa_layer(g, l)) qsa_idx[(size_t) l] = qi++;
-            else gdn_idx[(size_t) l] = gi++;
+        for (int64_t l = 0; l < g.n_layers; ++l) {   // a later stage's session holds its layers' states alone
+            if (is_qsa_layer(g, l)) qsa_idx[(size_t) l] = qi++ - qsa_first_;
+            else gdn_idx[(size_t) l] = gi++ - gdn_first_;
         }
     }
 
@@ -795,7 +812,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
         // the router, the doorbell and the main GPU's routed experts - the ones its VRAM tier holds, decided here from
         // the residency snapshot the pool reads too (it leaves their rows to the GPU)
-        if (l == 0 && grp == 0 && cudaStreamWaitEvent(cs, res_ready_, 0) != cudaSuccess) {
+        if (l == l0_ && grp == 0 && cudaStreamWaitEvent(cs, res_ready_, 0) != cudaSuccess) {
             err = "verify: the residency copy could not join";
             return false;
         }
@@ -994,7 +1011,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             err = "verify: the prediction branch could not join";
             return false;
         }
-        if (l == g.n_layers - 1)
+        if (l == g.n_layers - 1)   // a stage before the last hands the FFN output on unwritten (the inputs)
             for (int t = tb; t < te; ++t) gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
         stamp(l, 12, cs);
         return true;
@@ -1002,16 +1019,16 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
     stamp(g.n_layers, 1, cs);
     for (int grp = 0; grp < G; ++grp)
-        if (!pre(0, grp)) return false;
-    for (int64_t l = 0; l < g.n_layers; ++l)
+        if (!pre(l0_, grp)) return false;
+    for (int64_t l = l0_; l < l1_; ++l)
         for (int grp = 0; grp < G; ++grp) {
             if (!post(l, grp)) return false;
-            if (l + 1 < g.n_layers && !pre(l + 1, grp)) return false;
+            if (l + 1 < l1_ && !pre(l + 1, grp)) return false;
         }
     stamp(g.n_layers, 2, cs);
 
-    // ---- the head, T columns, and the argmax of each
-    {
+    // ---- the head, T columns, and the argmax of each (the last stage's)
+    if (l1_ == g.n_layers) {
         const WeightRef *hn = wt.find("output_hc_norm.weight"), *hd = wt.find("output_hc_down.weight"),
                         *hu = wt.find("output_hc_up.weight");
         if (!hn || !hd || !hu) { err = "verify: an output_hc_* weight is missing"; return false; }
@@ -1060,6 +1077,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         argmax_rows(head_logits_, T, (int) head_rows_, arg_scratch_, m_out_, cs, m_val_, nan_guard_ ? m_bad_ : nullptr);
     }
     if (host_rows_) copy_from_mapped(m_rows_, R_, (int64_t) T * HC * N, cs);   // a plain copy kernel, here to host
+    if (host_rows_ && l1_ < g.n_layers) {
+        copy_from_mapped(m_rows_ + (size_t) MT * HC * N, bo_, (int64_t) T * N, cs);
+        copy_from_mapped(m_rows_ + (size_t) MT * HC * N + (size_t) MT * N, inj2_, (int64_t) T * HC, cs);
+    }
     stamp(g.n_layers, 3, cs);
     stamp(g.n_layers, 4, cs);   // right after the last: one stamp's own cost
     return true;
@@ -1121,8 +1142,8 @@ bool Verifier::capture_commit(std::string& err) {
     bool ok = true;
     try {
         copy_i32_from_mapped(commit_, m_commit_, 2 + MT, cs_);
-        int64_t qsa_index = 0, gdn_index = 0;
-        for (int64_t l = 0; l < g.n_layers && ok; ++l) {
+        int64_t qsa_index = 0, gdn_index = 0;   // the session's states are indexed from l0_
+        for (int64_t l = l0_; l < l1_ && ok; ++l) {
             const LayerView v(*wt_, l);
             if (!is_qsa_layer(g, l)) {
                 float* state = ss.gdn_state + (size_t) gdn_index * gdn_floats;
@@ -1145,7 +1166,7 @@ bool Verifier::capture_commit(std::string& err) {
                 ++qsa_index;
             }
         }
-        if (ok && ss.ple.ready()) copy_indexed(ss.ple.hist, hist_snap_, HS, commit_ + 1, HS, cs_);
+        if (ok && ss.ple.ready() && l0_ <= 1 && l1_ > 1) copy_indexed(ss.ple.hist, hist_snap_, HS, commit_ + 1, HS, cs_);
     } catch (const std::exception& e) {
         err = std::string("verify commit: ") + e.what();
         ok = false;
@@ -1181,7 +1202,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         qsa_step_fill(h_step_ + t * kStepCount, pos0 + t, s);
         for (int64_t h = 0; h < g.n_head; ++h) h_pos_[t * g.n_head + h] = (int32_t) (pos0 + t);
     }
-    const bool ple_on = ss.ple.ready();
+    const bool ple_on = ss.ple.ready() && l0_ <= 1 && l1_ > 1;
     if (ple_on) {   // the reads start here unless ple_ahead started them
         int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
         for (int t = 0; t < T; ++t) {
@@ -1248,7 +1269,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             late_flag = nullptr;
         }
     };
-    for (int64_t k = 0; k < g.n_layers * G; ++k) {
+    for (int64_t k = l0_ * G; k < l1_ * G; ++k) {
         const int64_t l = k / G;
         const int grp = (int) (k % G);
         const uint32_t want = (uint32_t) (k + 1);
@@ -1320,10 +1341,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             late_at = Clock::now();
             ++late2;
         }
-        if (tail_ != nullptr && k + 1 == g.n_layers * G) tail_(tail_user_);
+        if (tail_ != nullptr && k + 1 == l1_ * G) tail_(tail_user_);
         // the next layer's prediction, published during this layer's pool, else microseconds later (its branch is
         // joined before the next layer): waited for, so the experts the second GPU takes never depend on timing
-        if (predict_ != nullptr && G == 1 && l + 1 < g.n_layers && native_router_enabled()) {
+        if (predict_ != nullptr && G == 1 && l + 1 < l1_ && native_router_enabled()) {
             const Clock::time_point c = Clock::now();
             if (*(volatile uint32_t*) h_pseq_ < (uint32_t) (l + 1)) {
                 ++predict_late;
@@ -1342,14 +1363,14 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         }
         // a guarded tier's pump never runs while the second GPU is behind: its enqueue can block on a GPU that is
         // spinning on the second-GPU flag, and this thread is what launches that GPU's next graph (deadlock)
-        if (rows_in_ != nullptr && k + 1 < g.n_layers * G &&
+        if (rows_in_ != nullptr && k + 1 < l1_ * G &&
             (!rows_after_gpu2_ || !gpu2_ || *(volatile uint32_t*) sink_.gpu2_flag >= want))
             rows_in_(rows_user_, l);
     }
     // the last layer's second-GPU rows: no later doorbell bounds the graph's wait for them, and a spin kernel left
     // running when the engine ends can leave the GPU lost until a power cycle (upstream #267)
     for (const Clock::time_point w0 = Clock::now();
-         gpu2_ && *(volatile uint32_t*) sink_.gpu2_flag < (uint32_t) (g.n_layers * G);) {
+         gpu2_ && *(volatile uint32_t*) sink_.gpu2_flag < (uint32_t) (l1_ * G);) {
         settle(false);
         _mm_pause();
         if (ms_since(w0) > 5000.0) {
@@ -1397,7 +1418,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                       cs_);
         if (cudaStreamSynchronize(cs_) != cudaSuccess) { err = "verify: the head sampling failed"; return false; }
     }
-    for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
+    if (l1_ == g.n_layers)
+        for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
     if (stamps_ != nullptr && G == 1) {
         const int64_t NL = g.n_layers;
         h_stamps_.resize((size_t) (NL + 1) * kStamps);
@@ -1405,10 +1427,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                    h_stamps_.size() * sizeof(unsigned long long), cudaMemcpyDeviceToHost);
         if (prof_ns_.empty()) prof_ns_.assign(2 * kStamps, 0.0);
         const unsigned long long* w = h_stamps_.data() + (size_t) NL * kStamps;
-        for (int64_t l = 0; l < NL; ++l) {
+        for (int64_t l = l0_; l < l1_; ++l) {
             const unsigned long long* st = h_stamps_.data() + (size_t) l * kStamps;
             const int kind = is_qsa_layer(g, l) ? 1 : 0;
-            const unsigned long long before = l == 0 ? w[1] : (st - kStamps)[kLayerStamps - 1];
+            const unsigned long long before = l == l0_ ? w[1] : (st - kStamps)[kLayerStamps - 1];
             prof_ns_[(size_t) kind * kStamps] += (double) (st[0] - before);
             for (int i = 1; i < kLayerStamps; ++i) prof_ns_[(size_t) kind * kStamps + i] += (double) (st[i] - st[i - 1]);
             // the shared expert's branch and the second GPU's rows', from the doorbell (they fork there) to their ends

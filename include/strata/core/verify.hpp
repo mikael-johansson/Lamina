@@ -174,6 +174,13 @@ public:
         rows_user_ = user;
         rows_after_gpu2_ = after_gpu2;
     }
+    /// --decode-split: the window runs layers [l0, l1) only.  With l0 > 0 its input is the residual rows the stage
+    /// before it wrote (`set_input_rows`), and `ss` holds the states of these layers alone, indexed from l0 as the
+    /// prompt split's second stage's are (prefill/split.hpp); with l1 < n_layers there is no head and the rows after
+    /// the last layer go to `final_R_host` (set_host_rows).  Set before `init`.
+    void set_layers(int64_t l0, int64_t l1) { l0_ = l0; l1_ = l1; }
+    /// The pinned, portable host rows (max_t * hc * n_embd floats) the stage before this one writes.  Before `init`.
+    void set_input_rows(const float* host) { in_host_ = host; }
     cudaEvent_t window_done() const { return done_; }
     /// The pool gives a second GPU a share of each layer (`GpuPlanSink::gpu2_flag`): it writes its rows into the
     /// pool's rows and raises its token group's flag, and a branch of the window, forked at the ring, takes them
@@ -210,6 +217,10 @@ private:
     VerifyHits hits_;
     const NativeHead* head_ = nullptr;
     int max_t_ = 0;
+    int64_t l0_ = 0, l1_ = -1;                                  // the layers this window runs (set_layers)
+    int64_t gdn_first_ = 0, qsa_first_ = 0;                     // the GDN and QSA layers before l0_
+    const float* in_host_ = nullptr;                            // set_input_rows, and its device alias
+    float* m_in_ = nullptr;
     int last_t_ = 0;
     int64_t last_pos0_ = 0;
     int32_t last_tokens_[8] = {};
