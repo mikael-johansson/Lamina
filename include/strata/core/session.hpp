@@ -75,6 +75,8 @@ struct SessionState {
 
 /// The floats of one GDN layer's state, its recurrence and conv history (`gdn_state` holds one per GDN layer).
 uint64_t gdn_state_floats(const ModelGeometry& g);
+/// The bytes of the PLE's conv history (`ple_hist`).
+uint64_t ple_hist_bytes();
 /// Bytes for a whole session at `max_cells` of context.  Every layer's state is sized at once, because P2.T10
 /// requires ZERO token-path allocations - a `cudaMalloc` that happened on the first token of a longer sequence
 /// would satisfy every test here and fail that one.

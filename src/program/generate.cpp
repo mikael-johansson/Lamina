@@ -339,6 +339,9 @@ struct Options {
     /// Plan v0.3 P6: every `adapt_every` rounds, swap up to `adapt_swaps` of the most-routed missing experts into
     /// the VRAM tier in place of the least-routed resident ones (decayed counts).  0 = static residency.
     int adapt_every = 4;
+    /// --batch N (the server's "parallel": N): with --decode-split, up to N requests decode at once in batch slots,
+    /// the two GPUs' stages of different requests overlapping (BGEN / BT / BDONE; 0: one at a time)
+    int batch = 0;
     /// Plan v0.3 P6: a draft enters the verify window only while every draft before it (and itself) has at least
     /// this probability under the draft layer; 0 = always --spec-1 drafts.
     double spec_min_p = 0.0;
@@ -798,6 +801,33 @@ void drive_tail(void* user) {
         t->d.fail = t->tier_err.c_str();
     }
 }
+
+/// --batch with --decode-split: a request decoding in a batch slot beside the others (the server's BGEN, BT and BDONE
+/// lines).  Its sessions on both GPUs sit at fixed addresses (its windows' graphs bake them in), sized for `cells`; a
+/// BGEN reads the prompt in the main session as a GEN of one token does, and its state is then copied in here.
+struct BatchSlot {
+    int id = 0;
+    bool made = false;                 // its sessions, windows and drafter exist
+    std::atomic<bool> active{false};   // between its BADM 1 and its BDONE
+    std::atomic<bool> stop{false};     // BSTOP
+    int64_t cells = 0;
+    void* mem1 = nullptr;              // its sessions' device memory: the main GPU's (layers before the split, PLE)
+    void* mem2 = nullptr;              // and the second GPU's
+    strata::core::SessionState ss1, ss2;
+    std::vector<strata::core::QsaState> q1, q2;
+    strata::core::Verifier A, B;
+    strata::core::MtpDrafter m;
+    int64_t p = 0, produced = 0, max_new = 0, rounds = 0, offered = 0, accepted = 0;
+    int32_t x = 0;
+    int T = 1;
+    std::vector<int32_t> window, outv, drafts;
+    std::vector<float> dprob;
+    double spec_min_p = 0;
+    int phase = 0;                     // 0: its next window's first stage is due; 1: a window is on its way
+    std::vector<int64_t> toks;         // the prompt and what it emitted
+    std::vector<int64_t> held;         // once done: the tokens its sessions hold (a solo path continuing it copies them)
+    Clock::time_point t0;
+};
 
 /// STRATA_DSPLIT_ONEPOOL=1 (the two-request test): both stages' host threads share the one pool, one dispatch at a time.
 std::mutex* g_pool_lock = nullptr;
@@ -1399,6 +1429,7 @@ int main(int argc, char** argv) {
         else if (a == "--head-split") o.head_split = std::atof(next("--head-split"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
         else if (a == "--adapt-every") o.adapt_every = std::atoi(next("--adapt-every"));
+        else if (a == "--batch" || a == "--slots") o.batch = std::atoi(next(a.c_str()));
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
         else if (a == "--spec-lookup") o.spec_lookup = std::max(0, std::atoi(next("--spec-lookup")));
         else if (a == "--stop-eos") o.stop_eos = true;
@@ -4090,6 +4121,22 @@ int main(int argc, char** argv) {
                          (long long) o.cache_ram_mib);
         // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
         // away, or pressed Esc): the flag is checked between prompt chunks and between verify windows.
+        // ---- --batch: the batch slots (with --decode-split; without it requests go one at a time)
+        const int n_slots = o.batch >= 2 && ver2 != nullptr ? std::min(o.batch, 4) : 0;
+        if (o.batch >= 2 && ver2 == nullptr)
+            std::fprintf(stderr, "strata serve: --batch needs --decode-split in this engine: one request at a time\n");
+        std::vector<std::unique_ptr<BatchSlot>> slots;
+        for (int i = 0; i < n_slots; ++i) {
+            slots.push_back(std::make_unique<BatchSlot>());
+            slots.back()->id = i;
+        }
+        const int64_t slot_cells = [&] {
+            const char* v = std::getenv("STRATA_SLOT_CELLS");
+            const int64_t c = v != nullptr ? std::atoll(v) : 131072;
+            return std::min<int64_t>(o.max_context, std::max<int64_t>(c, 4096)) / 256 * 256;
+        }();
+        static std::mutex pool_lock2;
+        if (n_slots > 0) g_pool_lock = &pool_lock2;   // the slots' two threads and the solo path share the pool
         std::atomic<bool> stop_req{false};
         std::mutex in_mu;
         std::condition_variable in_cv;
@@ -4100,6 +4147,11 @@ int main(int argc, char** argv) {
             while (std::getline(std::cin, l)) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
                 if (l == "STOP") { stop_req.store(true); continue; }
+                if (l.rfind("BSTOP ", 0) == 0) {   // a slot ends at its next window
+                    const int b = std::atoi(l.c_str() + 6);
+                    if (b >= 0 && b < (int) slots.size()) slots[(size_t) b]->stop.store(true);
+                    continue;
+                }
                 std::lock_guard<std::mutex> lk(in_mu);
                 in_lines.push_back(l);
                 in_cv.notify_one();
@@ -4231,11 +4283,12 @@ int main(int argc, char** argv) {
             cudaMemGetInfo(&free_b, &total_b);
             std::printf("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=0 arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
-                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom\n",
+                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom%s\n",
                         (long long) o.max_context, o.kv.c_str(), (long long) xcache.slots(),
                         (long long) (xcache.bytes() >> 20), o.spec, o.spec, o.spec_lookup, (long long) (free_b >> 20),
                         (long long) (strata::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
-                        o.spec_min_p, o.second_gpu, (long long) o.tail_role_token);
+                        o.spec_min_p, o.second_gpu, (long long) o.tail_role_token,
+                        n_slots > 0 ? (" batch_slots=" + std::to_string(n_slots)).c_str() : "");
         }
         // --ple-io ram: READY only once the table is in RAM.  While it loads, its 28.8 GB of reads compete with the
         // requests and the rows still come from the SSD: a first chat right after READY decoded at ~21 tok/s instead
@@ -4282,8 +4335,279 @@ int main(int argc, char** argv) {
                                 tier2.fills,         tier2.dropped,      gpu2.prefetch_copied, gpu2.prefetch_used};
         };
         TierCounters req_tiers{};
-        while (next_line(line)) {
+        // ---- --batch: the slots' scheduler.  One thread runs every slot's first stage (layers before the split, the
+        // main GPU) and its window's commits, emitted tokens and next drafts; another runs every second stage (the
+        // second GPU), so one slot's second stage overlaps another's first.  Both take the one CPU pool in turn
+        // (g_pool_lock).  A control line (an admission) pauses them: the windows on their way finish first.
+        std::mutex smu;
+        std::condition_variable scv;
+        std::deque<int> s_todo, s_fin;   // windows for the second stage; windows to commit and draft from
+        bool s_paused = false, s_quit = false;
+        int s_busy = 0;
+        std::string s_err;
+        std::thread s_first, s_second;
+        Drive sdA, sdB;                  // each stage's pool user (the solo path keeps `drive`)
+        const int dev2 = ver2 != nullptr ? dsplit.device() : -1;
+        auto slot_fail = [&](const std::string& e) {
+            std::lock_guard<std::mutex> lk(smu);
+            if (s_err.empty()) s_err = e;
+            scv.notify_all();
+        };
+        // a window's end: its commits, its tokens out, the next drafts (the first thread)
+        auto slot_finish = [&](BatchSlot& b) -> bool {
+            std::string e;
+            int a = 0;
+            while (a < b.T - 1 && b.window[(size_t) a + 1] == b.outv[(size_t) a]) ++a;
+            if (!b.A.commit(a + 1, e, true)) { slot_fail(e); return false; }
+            cudaSetDevice(dev2);
+            const bool okb = b.B.commit(a + 1, e, true);
+            cudaSetDevice(o.main_gpu);
+            if (!okb) { slot_fail(e); return false; }
+            ++b.rounds;
+            b.offered += b.T - 1;
+            b.accepted += a;
+            const char* why = nullptr;
+            for (int k = 0; k <= a; ++k) {
+                const int32_t t = b.outv[(size_t) k];
+                std::printf("BT %d %d\n", b.id, (int) t);
+                b.toks.push_back(t);
+                ++b.produced;
+                if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) t) != o.eos_ids.end()) { why = "stop"; break; }
+                if (b.produced >= b.max_new) { why = "length"; break; }
+            }
+            std::fflush(stdout);
+            b.p += a + 1;   // the cells the window kept
+            b.x = b.outv[(size_t) a];
+            if (why == nullptr && b.stop.load()) why = "cancel";
+            if (why == nullptr && b.p + o.max_window() + 1 > b.cells) why = "length";   // the slot's room ends
+            if (why != nullptr) {
+                b.held.assign(b.toks.begin(), b.toks.begin() + (ptrdiff_t) std::min<int64_t>(b.p, (int64_t) b.toks.size()));
+                std::printf("BDONE %d %lld %s %.1f\n", b.id, (long long) b.produced, why,
+                            std::chrono::duration<double, std::milli>(Clock::now() - b.t0).count());
+                std::fflush(stdout);
+                std::fprintf(stderr, "strata serve: slot %d: %lld generated in %.0f ms, drafts %lld of %lld (%s)\n", b.id,
+                             (long long) b.produced, std::chrono::duration<double, std::milli>(Clock::now() - b.t0).count(),
+                             (long long) b.accepted, (long long) b.offered, why);
+                b.active.store(false);
+                return true;
+            }
+            b.m.set_max_drafts(o.spec - 1);
+            if (!b.m.draft(b.T, b.outv.data(), b.p - (a + 1), a, b.drafts.data(), e, b.dprob.data(), (float) b.spec_min_p)) {
+                slot_fail(e);
+                return false;
+            }
+            return true;
+        };
+        auto start_slots = [&] {
+            if (s_first.joinable()) return;
+            sdA.d = drive.d;
+            sdA.ring_us = drive.ring_us;
+            sdA.n_layers = drive.n_layers;
+            sdB.d = drive.d;
+            sdB.ring_us = drive.ring_us;
+            sdB.n_layers = drive.n_layers;
+            s_first = std::thread([&] {
+                (void) strata::kernels::cpu::pin_current_thread(placement.host());
+                cudaSetDevice(o.main_gpu);
+                for (;;) {
+                    int f = -1, i = -1;
+                    {
+                        std::unique_lock<std::mutex> lk(smu);
+                        auto due = [&] {
+                            for (auto& b : slots) if (b->active.load() && b->phase == 0) return true;
+                            return false;
+                        };
+                        scv.wait(lk, [&] { return s_quit || !s_fin.empty() || (!s_paused && due()); });
+                        if (s_quit) return;
+                        if (!s_fin.empty()) {
+                            f = s_fin.front();
+                            s_fin.pop_front();
+                        } else {   // the slot whose window is longest due
+                            for (auto& b : slots)
+                                if (b->active.load() && b->phase == 0 && (i < 0 || b->rounds < slots[(size_t) i]->rounds))
+                                    i = b->id;
+                            slots[(size_t) i]->phase = 1;
+                        }
+                        ++s_busy;
+                    }
+                    if (f >= 0) {
+                        BatchSlot& b = *slots[(size_t) f];
+                        slot_finish(b);
+                        std::lock_guard<std::mutex> lk(smu);
+                        b.phase = 0;
+                        --s_busy;
+                        scv.notify_all();
+                        continue;
+                    }
+                    BatchSlot& b = *slots[(size_t) i];
+                    int T = o.spec;
+                    if (b.spec_min_p > 0.0) {
+                        T = 1;
+                        while (T < o.spec && b.dprob[(size_t) T - 1] >= (float) b.spec_min_p) ++T;
+                    }
+                    T = (int) std::min<int64_t>(T, b.max_new - b.produced);
+                    T = std::max(T, 1);
+                    for (int k = 1; k < T; ++k)   // never past a drafted end-of-turn
+                        if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) b.drafts[(size_t) k - 1]) != o.eos_ids.end()) {
+                            T = k + 1;
+                            break;
+                        }
+                    b.T = T;
+                    b.window[0] = b.x;
+                    for (int k = 1; k < T; ++k) b.window[(size_t) k] = b.drafts[(size_t) k - 1];
+                    drive_window(&sdA, T);
+                    sdA.d.layers = 0;
+                    sdA.d.experts = 0;
+                    sdA.d.failed = false;
+                    sdA.d.plan = b.A.plan_sink();
+                    sdA.d.host_res = b.A.residency();
+                    std::string e;
+                    const bool ok = b.A.run(T, b.window.data(), b.p, &drive_pool_multi, &sdA, b.outv.data(), e) &&
+                                    !sdA.d.failed;
+                    std::lock_guard<std::mutex> lk(smu);
+                    --s_busy;
+                    if (ok) s_todo.push_back(i);
+                    else if (s_err.empty()) s_err = e.empty() ? "a slot's first stage failed" : e;
+                    scv.notify_all();
+                }
+            });
+            s_second = std::thread([&] {
+                (void) strata::kernels::cpu::pin_current_thread(0);
+                cudaSetDevice(o.main_gpu);
+                for (;;) {
+                    int i = -1;
+                    {
+                        std::unique_lock<std::mutex> lk(smu);
+                        scv.wait(lk, [&] { return s_quit || !s_todo.empty(); });
+                        if (s_quit) return;
+                        i = s_todo.front();
+                        s_todo.pop_front();
+                        ++s_busy;
+                    }
+                    BatchSlot& b = *slots[(size_t) i];
+                    drive_window(&sdB, b.T);
+                    sdB.d.layers = 0;
+                    sdB.d.experts = 0;
+                    sdB.d.failed = false;
+                    sdB.d.plan = b.B.plan_sink();
+                    sdB.d.host_res = b.B.residency();
+                    std::string e;
+                    cudaSetDevice(dev2);
+                    bool ok = b.B.run(b.T, b.window.data(), b.p, &drive_pool_multi, &sdB, b.outv.data(), e) && !sdB.d.failed;
+                    cudaSetDevice(o.main_gpu);
+                    // the drafter reads the window's last rows from the first stage's buffer
+                    ok = ok && cudaMemcpy((void*) b.A.final_R_all(), b.B.final_R_host(),
+                                          (size_t) b.T * (size_t) (g.hc * g.n_embd) * sizeof(float),
+                                          cudaMemcpyHostToDevice) == cudaSuccess;
+                    std::lock_guard<std::mutex> lk(smu);
+                    --s_busy;
+                    if (ok) s_fin.push_back(i);
+                    else if (s_err.empty()) s_err = e.empty() ? "a slot's second stage failed" : e;
+                    scv.notify_all();
+                }
+            });
+        };
+        // a control line's turn: the slots' windows on their way finish, then nothing of theirs runs until resume
+        auto pause_slots = [&] {
+            if (!s_first.joinable()) return;
+            std::unique_lock<std::mutex> lk(smu);
+            s_paused = true;
+            scv.wait(lk, [&] { return s_busy == 0 && s_todo.empty() && s_fin.empty(); });
+        };
+        auto resume_slots = [&] {
+            std::lock_guard<std::mutex> lk(smu);
+            s_paused = false;
+            scv.notify_all();
+        };
+        // a slot's sessions, windows and drafter, once (their addresses stay: the windows' graphs bake them in)
+        auto make_slot = [&](BatchSlot& b, std::string& e) -> bool {
+            if (b.made) return true;
+            const int64_t L = dsplit.at();
+            b.cells = slot_cells;
+            const uint64_t b1 = strata::core::range_session_bytes(g, b.cells, 0, L);
+            if (cudaMalloc(&b.mem1, (size_t) b1) != cudaSuccess ||
+                !strata::core::make_range_session(g, b.cells, 0, L, K, b.mem1, b.ss1, b.q1)) {
+                e = "batch slot " + std::to_string(b.id) + ": its session (" + std::to_string(b1 >> 20) +
+                    " MiB) does not fit on the main GPU";
+                return false;
+            }
+            b.ss1.ple = ss.ple;
+            b.ss1.ple.token = &b.ss1.ple_token;
+            b.ss1.ple.prev = b.ss1.ple_prev;
+            b.ss1.ple.hist = b.ss1.ple_hist;
+            if (!dsplit.make_session(b.ss2, b.q2, b.mem2, e, b.cells)) return false;
+            b.A.set_layers(0, L);
+            b.A.set_host_rows(true);
+            if (!b.A.init(wt, g, b.ss1, vh, &native_head, W, e)) return false;
+            b.A.set_pcie_share(false);
+            strata::core::VerifyHits vh2;
+            vh2.res = host_res2.data();
+            vh2.cache_base = gpu2.cache().device_slot(0);
+            vh2.slot_off = gpu2.cache().slot_offsets();
+            vh2.slots = gpu2.cache().slots();
+            vh2.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+            cudaSetDevice(dev2);
+            b.B.set_layers(L, g.n_layers);
+            b.B.set_input_rows(b.A.final_R_host());
+            b.B.set_host_rows(true);
+            b.B.set_pcie_share(false);
+            const bool okb = b.B.init(dsplit.weights(), g, b.ss2, vh2, &dsplit.head(), W, e);
+            cudaSetDevice(o.main_gpu);
+            if (!okb) return false;
+            // the drafter's K/V of the slot's length, never elastic (the main session's growth is not its own)
+            const bool elastic = strata::core::qsa_kv_elastic();
+            strata::core::qsa_set_kv_elastic(false, 0);
+            const bool okm = b.m.load_shared(mtp, b.ss1, W, e) && b.m.bind(wt, &native_head, b.A.final_R_all(), e);
+            strata::core::qsa_set_kv_elastic(elastic, 0);
+            if (!okm) return false;
+            b.window.assign((size_t) W, 0);
+            b.outv.assign((size_t) W, 0);
+            b.drafts.assign((size_t) W, 0);
+            b.dprob.assign((size_t) W, 0.0f);
+            b.made = true;
+            size_t f1 = 0, t1 = 0, f2 = 0, t2 = 0;
+            cudaMemGetInfo(&f1, &t1);
+            cudaSetDevice(dev2);
+            cudaMemGetInfo(&f2, &t2);
+            cudaSetDevice(o.main_gpu);
+            std::fprintf(stderr, "strata serve: batch slot %d made: %lld cells, %.0f MiB of sessions; %lld / %lld MiB left "
+                                 "free\n", b.id, (long long) b.cells,
+                         (double) (b1 + strata::core::range_session_bytes(g, b.cells, L, g.n_layers)) / 1048576.0,
+                         (long long) (f1 >> 20), (long long) (f2 >> 20));
+            return true;
+        };
+        while ((resume_slots(), next_line(line))) {
             if (line == "QUIT") break;
+            if (line.rfind("BYIELD ", 0) == 0) continue;   // this engine reads a prompt through: the server takes it as such
+            if (!s_err.empty()) {
+                std::fprintf(stderr, "strata serve: a batch slot failed: %s\n", s_err.c_str());
+                std::printf("ERR %s\n", s_err.c_str());
+                std::fflush(stdout);
+                return 1;
+            }
+            // BGEN <slot> <max_new> [keys] <ids>: read the prompt as a GEN of one token, then go on in the slot
+            int admit = -1;
+            long long admit_max = 0;
+            if (line.rfind("BGENI ", 0) == 0) {
+                std::printf("ERR BGEN: images go through the solo path in this engine\n");
+                std::fflush(stdout);
+                continue;
+            }
+            if (line.rfind("BGEN ", 0) == 0) {
+                char* e1 = nullptr;
+                const long b = std::strtol(line.c_str() + 5, &e1, 10);
+                char* e2 = nullptr;
+                admit_max = std::strtoll(e1, &e2, 10);
+                if (e1 == nullptr || e2 == e1 || b < 0 || b >= (long) slots.size() || slots[(size_t) b]->active.load() ||
+                    admit_max < 1) {
+                    std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", (int) slots.size());
+                    std::fflush(stdout);
+                    continue;
+                }
+                admit = (int) b;
+                line = std::string("GEN 1") + e2;
+            }
+            pause_slots();   // the prompt path and the solo windows have the GPUs and the pool to themselves
             stop_req.store(false);   // a STOP that arrived between requests is stale
             err.clear();             // and so is a stopped request's "cancelled"
             const bool geni = line.rfind("GENI ", 0) == 0;
@@ -4505,6 +4829,32 @@ int main(int argc, char** argv) {
             if (poisoned) {
                 pcache.clear();
                 poisoned = false;
+            }
+            // a batch slot that ended (it went back to the solo path, or its conversation's next turn is here): its
+            // sessions hold this prompt's start, so they become the main session's and the prompt cache goes on from them
+            if (!slots.empty() && req_imgs.empty()) {
+                BatchSlot* from = nullptr;
+                for (auto& b : slots)
+                    if (!b->active.load() && b->made && b->held.size() >= 2 && b->held.size() < ids.size() &&
+                        std::equal(b->held.begin(), b->held.end(), ids.begin()) &&
+                        (from == nullptr || b->held.size() > from->held.size()))
+                        from = b.get();
+                if (from != nullptr) {
+                    const int64_t cells = (int64_t) from->held.size(), L = dsplit.at();
+                    bool ok = !kvg.on || kvg_ensure(cells + 256);
+                    ok = ok && strata::core::session_copy_layers(from->ss1, ss, g, cells, 0, L, 0, main_cs) &&
+                         strata::core::qsa_copy_cells(from->m.kv_state(), mtp.kv_state(), g, cells, main_cs) &&
+                         cudaStreamSynchronize(main_stream) == cudaSuccess;
+                    cudaSetDevice(dev2);
+                    ok = ok && strata::core::session_copy_layers(from->ss2, dsplit.session(), g, cells, L, g.n_layers, L,
+                                                                  nullptr);
+                    cudaSetDevice(o.main_gpu);
+                    if (!ok) { report("copying a batch slot's sessions back"); return 1; }
+                    pcache.forget();
+                    pcache.set(0, from->held.data(), cells);
+                    tr("from batch slot", from->id, cells);
+                    from->held.clear();
+                }
             }
             const int64_t reuse = pcache.begin(ids, req_imgs);
             tr("request", n, reuse);
@@ -4733,6 +5083,8 @@ int main(int argc, char** argv) {
             mtp.on_draft = [&](int j, int32_t tok, float prob) {   // the drafts the next window will verify
                 if (lk == 0 && prob >= (float) req_spec_min_p) ver.ple_ahead(j + 1, tok);
             };
+            int last_T = 0, last_a = 0;   // the last window's (a batch slot's admission goes on from it)
+            int64_t last_p = 0;
             ver.set_logits_wanted(!req_score.empty() || ddump.on());   // score=: a split head's first row whole
             std::vector<float> dd_logits(ddump.on() ? (size_t) W * (size_t) n_vocab : 0);
             while (poison_at < 0 && produced_n < max_new) {
@@ -4865,6 +5217,9 @@ int main(int argc, char** argv) {
                     ddump.put_round((int32_t) p, T, a, d3, p3);
                 }
                 if (eos) { finish = "stop"; break; }
+                last_T = T;
+                last_a = a;
+                last_p = p;
                 x = outv[(size_t) a];
                 p += a + 1;
             }
@@ -4905,6 +5260,49 @@ int main(int argc, char** argv) {
                         prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) reuse, (long long) (hits1 - hits0), (long long) (look1 - look0));
             std::fflush(stdout);
+            if (admit >= 0) {   // BGEN: on in the slot from the state the prompt and its first token left
+                BatchSlot& b = *slots[(size_t) admit];
+                bool cont = std::strcmp(finish, "length") == 0 && poison_at < 0 && produced_n >= 1 && admit_max > 1 &&
+                            last_T > 0 && p + W + 1 <= slot_cells;
+                std::string e;
+                if (cont && !make_slot(b, e)) { report(e); return 1; }
+                if (cont) {
+                    const int64_t L = dsplit.at();
+                    bool ok = strata::core::session_copy_layers(ss, b.ss1, g, p, 0, L, 0, main_cs) &&
+                              strata::core::qsa_copy_cells(mtp.kv_state(), b.m.kv_state(), g, p, main_cs) &&
+                              cudaMemcpyAsync((void*) b.A.final_R_all(), ver.final_R_all(),
+                                              (size_t) last_T * (size_t) (g.hc * g.n_embd) * sizeof(float),
+                                              cudaMemcpyDeviceToDevice, main_stream) == cudaSuccess &&
+                              cudaStreamSynchronize(main_stream) == cudaSuccess;
+                    cudaSetDevice(dev2);
+                    ok = ok && strata::core::session_copy_layers(dsplit.session(), b.ss2, g, p, L, g.n_layers, L, nullptr);
+                    b.B.set_sampling(req_sp);   // (penalties stay on the solo path)
+                    cudaSetDevice(o.main_gpu);
+                    if (!ok) { report("copying the admission's state into batch slot " + std::to_string(admit)); return 1; }
+                    b.p = p;
+                    b.x = x;
+                    b.max_new = admit_max - 1;
+                    b.produced = b.rounds = b.offered = b.accepted = 0;
+                    b.spec_min_p = req_spec_min_p;
+                    b.stop.store(false);
+                    b.toks.assign(ids.begin(), ids.end());
+                    b.toks.push_back(x);
+                    b.held.clear();
+                    b.phase = 0;
+                    b.t0 = Clock::now();
+                    b.m.set_prompt_len(n);
+                    b.m.set_max_drafts(o.spec - 1);
+                    if (!b.m.draft(last_T, outv.data(), last_p, last_a, b.drafts.data(), e, b.dprob.data(),
+                                   (float) req_spec_min_p)) {
+                        report(e);
+                        return 1;
+                    }
+                    b.active.store(true);
+                }
+                std::printf("BADM %d %d\n", admit, cont ? 1 : 0);
+                std::fflush(stdout);
+                if (cont) start_slots();
+            }
             const int64_t fresh = n - reuse;
             std::fprintf(stderr, "strata serve: %lld prompt tokens (%lld cached) in %.0f ms (%.1f tok/s), %lld generated "
                                  "in %.0f ms (%.1f tok/s)\n", (long long) n, (long long) reuse, prompt_ms,
@@ -4916,6 +5314,13 @@ int main(int argc, char** argv) {
             if (replace) replan();
             profile_dirty = true;
         }
+        {
+            std::lock_guard<std::mutex> lk(smu);
+            s_quit = true;
+            scv.notify_all();
+        }
+        if (s_first.joinable()) s_first.join();
+        if (s_second.joinable()) s_second.join();
         if (profile_dirty) save_profile("exit");   // QUIT, Ctrl+C, or the server closed stdin
         return 0;
     }

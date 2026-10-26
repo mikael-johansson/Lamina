@@ -187,31 +187,55 @@ bool DecodeSplit::copy_state(int64_t c0, int64_t c1, bool in, std::string& err) 
 
 bool DecodeSplit::copy_in(int64_t cells, std::string& err) { return copy_state(0, cells, true, err); }
 
-bool DecodeSplit::make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err) {
+uint64_t range_session_bytes(const ModelGeometry& g, int64_t cells, int64_t lo, int64_t hi) {
+    uint64_t n = 0;
+    for (int64_t l = lo; l < hi; ++l)
+        n += is_qsa_layer(g, l) ? up(qsa_state_prompt_bytes(g, cells, 0, true, qsa_kv_format()))
+                                : up((uint64_t) gdn_state_floats(g) * 4);
+    if (lo <= 1 && hi > 1) n += up(ple_hist_bytes());
+    return n + 4096;
+}
+
+bool make_range_session(const ModelGeometry& g, int64_t cells, int64_t lo, int64_t hi, int64_t k, void* mem,
+                        SessionState& out, std::vector<QsaState>& qsa) {
+    int64_t n_gdn = 0, n_qsa = 0;
+    for (int64_t l = lo; l < hi; ++l) ++(is_qsa_layer(g, l) ? n_qsa : n_gdn);
+    uint8_t* p = (uint8_t*) mem;
+    out = SessionState{};
+    out.gdn_state = (float*) p;
+    cudaMemset(p, 0, (size_t) n_gdn * gdn_state_floats(g) * 4);
+    p += up((uint64_t) n_gdn * gdn_state_floats(g) * 4);
+    qsa.assign((size_t) n_qsa, QsaState{});
+    for (QsaState& q : qsa) {
+        const uint64_t n = qsa_state_prompt_init(g, cells, 0, true, qsa_kv_format(), p, q, nullptr);
+        if (n == 0) return false;
+        p += up(n);
+    }
+    if (lo <= 1 && hi > 1) {
+        out.ple_hist = (float*) p;
+        cudaMemset(p, 0, (size_t) ple_hist_bytes());
+    }
+    out.qsa_states = qsa.data();
+    out.k = k;
+    out.max_cells = cells;
+    return cudaDeviceSynchronize() == cudaSuccess;
+}
+
+bool DecodeSplit::make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err,
+                               int64_t cells) {
     const ModelGeometry& g = *g_;
-    const int64_t cells = ss_->qsa_states[0].max_cells;
-    uint64_t sbytes = up((uint64_t) gdn_count_ * gdn_state_floats(g) * 4);
-    for (size_t i = 0; i < qsa_main_.size(); ++i) sbytes += up(qsa_state_prompt_bytes(g, cells, 0, true, qsa_kv_format()));
+    if (cells <= 0) cells = ss_->qsa_states[0].max_cells;
+    const uint64_t sbytes = range_session_bytes(g, cells, at_, g.n_layers);
     OnDevice on(dev_);
     if (cudaMalloc(&mem, (size_t) sbytes) != cudaSuccess) {
         err = "--decode-split: another session (" + std::to_string(sbytes >> 20) + " MiB) does not fit";
         return false;
     }
-    uint8_t* p = (uint8_t*) mem;
-    out = SessionState{};
-    out.gdn_state = (float*) p;
-    cudaMemset(p, 0, (size_t) gdn_count_ * gdn_state_floats(g) * 4);
-    p += up((uint64_t) gdn_count_ * gdn_state_floats(g) * 4);
-    qsa.assign(qsa_main_.size(), QsaState{});
-    for (QsaState& q : qsa) {
-        const uint64_t n = qsa_state_prompt_init(g, cells, 0, true, qsa_kv_format(), p, q, nullptr);
-        if (n == 0) { err = "--decode-split: another session's K/V"; return false; }
-        p += up(n);
+    if (!make_range_session(g, cells, at_, g.n_layers, ss2_.k, mem, out, qsa)) {
+        err = "--decode-split: another session's state";
+        return false;
     }
-    out.qsa_states = qsa.data();
-    out.k = ss2_.k;
-    out.max_cells = ss2_.max_cells;
-    return cudaDeviceSynchronize() == cudaSuccess;
+    return true;
 }
 
 bool DecodeSplit::save(int64_t pos, void* host) {

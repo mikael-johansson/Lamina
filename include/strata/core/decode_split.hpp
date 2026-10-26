@@ -23,6 +23,13 @@
 
 namespace strata::core {
 
+/// A session of the layers [lo, hi) for `cells` cells, on the current GPU: their GDN states, their QSA states in the
+/// prompt split's form (never elastic), and the PLE's history when layer 1 is among them; indexed from `lo`.  `mem`
+/// holds `range_session_bytes` bytes (its states are zeroed on the default stream).
+uint64_t range_session_bytes(const ModelGeometry& g, int64_t cells, int64_t lo, int64_t hi);
+bool make_range_session(const ModelGeometry& g, int64_t cells, int64_t lo, int64_t hi, int64_t k, void* mem,
+                        SessionState& out, std::vector<QsaState>& qsa);
+
 class DecodeSplit {
 public:
     DecodeSplit() = default;
@@ -54,7 +61,7 @@ public:
     /// a fresh sequence's zeroed state.
     /// Another session of the layers here (a second request's), on this GPU and zeroed; `mem` its device memory, freed
     /// by the caller (cudaFree, this GPU current).
-    bool make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err);
+    bool make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err, int64_t cells = 0);
     bool save(int64_t pos, void* host);
     bool load(int64_t pos, const void* host);
     void zero();
