@@ -69,6 +69,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <shared_mutex>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -831,6 +832,10 @@ struct BatchSlot {
 
 /// STRATA_DSPLIT_ONEPOOL=1 (the two-request test): both stages' host threads share the one pool, one dispatch at a time.
 std::mutex* g_pool_lock = nullptr;
+/// --batch: the residency the windows decide their hits by and the VRAM behind it.  A window holds it shared while it
+/// runs (its residency snapshot is taken at its start); what changes either (a prompt's loan and its refill, the
+/// elastic K/V's growth and trim, a batch slot's loan, a copy back) holds it alone, between windows.
+std::shared_mutex g_res_mx;
 
 /// Plan v0.3 P6: the pool for a verify window.
 void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_tok, int64_t k,
@@ -880,6 +885,7 @@ struct Stages {
 
     strata::core::Verifier& head() { return b != nullptr ? *b : *a; }
     bool run(int T, const int32_t* tokens, int64_t pos0, int32_t* out, std::string& err) {
+        std::shared_lock<std::shared_mutex> res_lk(g_res_mx);
         if (!a->run(T, tokens, pos0, &drive_pool_multi, drive, out, err)) return false;
         if (b == nullptr || drive->d.failed) return true;
         auto* const plan1 = drive->d.plan;
@@ -1535,6 +1541,13 @@ int main(int argc, char** argv) {
         o.adapt_every = 0;
         o.second_gpu_prefetch_mb = 0.0;
         o.prompt_split = o.decode_split;   // every prompt in the same two stages, on the decode split's own state
+        // --batch: each batch slot's windows and drafter live outside the caches (their sessions are lent from them):
+        // the VRAM the prompt path's lazy allocations need stays free beside them
+        if (o.batch >= 2) {
+            const int n = std::min(o.batch, 4);
+            o.vram_reserve_mib += 230 * n;
+            o.second_gpu_reserve_mib += 130 * n;
+        }
         const char* pieces = std::getenv("STRATA_DSPLIT_PIECES");
         g_split_pieces = pieces != nullptr ? std::atoi(pieces) : 1;
     }
@@ -2008,6 +2021,7 @@ int main(int argc, char** argv) {
     // is a mapping of the ORIGINAL second GGUF shard, the six weights are already loaded in the arena, and the
     // three buffers are the only allocation.
     strata::kernels::PleTable ple_table;
+    strata::kernels::PleTable ple_table2;   // --batch: the batch slots' (their windows run on a thread of their own)
     std::vector<float> ple_emb_host((size_t) strata::kernels::NG_N_EMBD);
     float* ple_emb_dev = nullptr;
     float* ple_scratch = nullptr;
@@ -2021,6 +2035,11 @@ int main(int argc, char** argv) {
         pio.io_thread = !o.ple_sync_submit;
         if (!ple_table.open(o.ple_gguf, err, pio)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
+        }
+        if (o.batch >= 2 && o.decode_split > 0 && pio.mode != strata::kernels::PleIo::Ram &&
+            !ple_table2.open(o.ple_gguf, err, pio)) {
+            std::fprintf(stderr, "strata generate: the batch slots' n-gram table: %s\n", err.c_str());
             return 1;
         }
         const strata::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
@@ -3853,6 +3872,7 @@ int main(int argc, char** argv) {
         };
         // Room for `cells` cells (rounded up to a step); false: no VRAM is left.
         auto kvg_ensure = [&](int64_t cells) -> bool {
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);   // it takes slots from the expert cache
             if (!kvg.on || cells <= kvg.cells) return true;
             const int64_t target = std::min<int64_t>(o.max_context + 64, (cells + kvg.step - 1) / kvg.step * kvg.step);
             const int64_t need = strata::core::qsa_kv_elastic_need(target);
@@ -3955,6 +3975,7 @@ int main(int argc, char** argv) {
         // A request that needs far fewer cells than the K/V holds gives the rest back: the slots refill with the
         // profile's hottest experts the GPU does not hold.  False: a CUDA failure left the tier half-changed.
         auto kvg_trim = [&](int64_t cells) -> bool {
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
             if (!kvg.on) return true;
             const int64_t target = std::max<int64_t>(kvg.step, (cells + kvg.step - 1) / kvg.step * kvg.step);
             if (kvg.cells < target + 2 * kvg.step || kvg.lo >= kvg.top) return true;
@@ -4176,7 +4197,7 @@ int main(int argc, char** argv) {
         // --arena-place: after a request, the arena's swaps for the residency the tiers left, a slice at a time while
         // no request waits (the GPUs' copies from the arena are done first: nothing reads it meanwhile)
         const char* replace_env = std::getenv("STRATA_ARENA_REPLACE");   // =0: the A/B arm without it
-        const bool replace = o.arena_place && srcp == &arena_src && !profile_rank.empty() &&
+        const bool replace = n_slots == 0 && o.arena_place && srcp == &arena_src && !profile_rank.empty() &&
                              !(replace_env != nullptr && std::atoi(replace_env) == 0);
         size_t replace_left = 0, replace_planned = 0;
         Clock::time_point replace_t0{};
@@ -4360,6 +4381,7 @@ int main(int argc, char** argv) {
         int64_t slot_end1 = -1, slot_end2 = -1;
         // an ended slot's slots back to the experts (refilled from the arena): before a request, once nothing reads them
         auto give_back_slots = [&](int except) {
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
             for (int i = 0; i < n_slots; ++i) {
                 if (i == except || slots[(size_t) i]->active.load()) continue;
                 std::string e;
@@ -4484,8 +4506,11 @@ int main(int argc, char** argv) {
                     sdA.d.plan = b.A.plan_sink();
                     sdA.d.host_res = b.A.residency();
                     std::string e;
-                    const bool ok = b.A.run(T, b.window.data(), b.p, &drive_pool_multi, &sdA, b.outv.data(), e) &&
-                                    !sdA.d.failed;
+                    bool ok;
+                    {
+                        std::shared_lock<std::shared_mutex> res_lk(g_res_mx);
+                        ok = b.A.run(T, b.window.data(), b.p, &drive_pool_multi, &sdA, b.outv.data(), e) && !sdA.d.failed;
+                    }
                     std::lock_guard<std::mutex> lk(smu);
                     --s_busy;
                     if (ok) s_todo.push_back(i);
@@ -4515,7 +4540,11 @@ int main(int argc, char** argv) {
                     sdB.d.host_res = b.B.residency();
                     std::string e;
                     cudaSetDevice(dev2);
-                    bool ok = b.B.run(b.T, b.window.data(), b.p, &drive_pool_multi, &sdB, b.outv.data(), e) && !sdB.d.failed;
+                    bool ok;
+                    {
+                        std::shared_lock<std::shared_mutex> res_lk(g_res_mx);
+                        ok = b.B.run(b.T, b.window.data(), b.p, &drive_pool_multi, &sdB, b.outv.data(), e) && !sdB.d.failed;
+                    }
                     cudaSetDevice(o.main_gpu);
                     // the drafter reads the window's last rows from the first stage's buffer
                     ok = ok && cudaMemcpy((void*) b.A.final_R_all(), b.B.final_R_host(),
@@ -4544,6 +4573,7 @@ int main(int argc, char** argv) {
         // a slot's sessions, windows and drafter, once (their addresses stay: the windows' graphs bake them in)
         // the slot's loans taken and its sessions laid out in them (zeroed: what the experts left there is not state)
         auto lend_slot = [&](BatchSlot& b, std::string& e) -> bool {
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
             const int64_t L = dsplit.at();
             SlotLoan &l1 = sl1[(size_t) b.id], &l2 = sl2[(size_t) b.id];
             if (l1.lent.empty()) l1.lend();
@@ -4554,6 +4584,7 @@ int main(int argc, char** argv) {
             cudaSetDevice(o.main_gpu);
             if (!ok1 || !ok2) { e = "batch slot " + std::to_string(b.id) + ": its sessions"; return false; }
             b.ss1.ple = ss.ple;
+            if (ple_table2.is_open()) b.ss1.ple.table = &ple_table2;   // the main thread's prompts read the other
             b.ss1.ple.token = &b.ss1.ple_token;
             b.ss1.ple.prev = b.ss1.ple_prev;
             b.ss1.ple.hist = b.ss1.ple_hist;
@@ -4681,7 +4712,13 @@ int main(int argc, char** argv) {
                 admit = (int) b;
                 line = std::string("GEN 1") + e2;
             }
-            pause_slots();   // the prompt path and the solo windows have the GPUs and the pool to themselves
+            // an admission reads its prompt beside the slots' windows (the residency lock keeps them apart where they
+            // meet); a solo request while slots decode has the GPUs to itself
+            if (admit < 0 || !ple_table2.is_open()) {   // (one n-gram table: the slots' windows wait for it too)
+                bool busy = false;
+                for (auto& b : slots) busy = busy || b->active.load();
+                if (busy) pause_slots();
+            }
             stop_req.store(false);   // a STOP that arrived between requests is stale
             err.clear();             // and so is a stopped request's "cancelled"
             const bool geni = line.rfind("GENI ", 0) == 0;
@@ -4929,7 +4966,9 @@ int main(int argc, char** argv) {
                     tr("from batch slot", from->id, cells);
                     from->held.clear();
                 }
-                if (!give_back_slots(admit)) { report("giving a batch slot's VRAM back"); return 1; }
+                // back to one request: the slots' VRAM goes back to the experts (an admission keeps it: the next one
+                // would only lend it again, and a refill holds the other slots' windows up)
+                if (admit < 0 && !give_back_slots(-1)) { report("giving a batch slot's VRAM back"); return 1; }
             }
             const int64_t reuse = pcache.begin(ids, req_imgs);
             tr("request", n, reuse);
@@ -5005,7 +5044,10 @@ int main(int argc, char** argv) {
                 const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * chunk;
                 // (--decode-split: every prompt, the layers from the split on hold their state on the second GPU)
                 const bool split_try = pbuf.split != nullptr && (batched_end - reuse > o.prefill_chunk || o.decode_split > 0);
-                if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
+                {
+                    std::unique_lock<std::shared_mutex> res_lk(g_res_mx);   // its loan leaves the residency
+                    if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
+                }
                 const bool split_on = pbuf.split_region != nullptr;
                 if (split_on) {
                     if (!psplit.begin(pbuf.split_region, pbuf.split_bytes, chunk, reuse, batched_end, track, err)) {
@@ -5050,6 +5092,7 @@ int main(int argc, char** argv) {
                 }
                 // the tiers' moves (deterministic modes: refilled before the windows, as they were)
                 const bool through_tiers = o.adapt_every > 0 && !o.deterministic_adapt;
+                std::unique_lock<std::shared_mutex> res_give(g_res_mx);
                 if (through_tiers ? !pbuf.give_back_tiers(&tier, &tier2, &prefill.routed(), *srcp, err)
                                   : !pbuf.give_back(*srcp, err)) {
                     report("refilling a lent slot failed: " + err);
