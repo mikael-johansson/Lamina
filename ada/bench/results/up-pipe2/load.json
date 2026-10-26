@@ -1,0 +1,84 @@
+{
+ "tag": "up-pipe2",
+ "config": "/tmp/claude-1000/-home-mikaeljo-git-strata/fe895871-8bbc-4761-b845-da895fd312d2/scratchpad/up-pipe2.json",
+ "parallel": 2,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 3.7,
+   "total_tokens": 512,
+   "total_tps": 137.4,
+   "clients": [
+    {
+     "ttft_s": 0.39,
+     "tokens": 512,
+     "decode_tps": 153.1,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 1,
+   "wall_s": 3.3,
+   "total_tokens": 512,
+   "total_tps": 155.1,
+   "clients": [
+    {
+     "ttft_s": 0.31,
+     "tokens": 512,
+     "decode_tps": 171.1,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 0,
+   "wall_s": 7.0,
+   "total_tokens": 1024,
+   "total_tps": 145.9,
+   "clients": [
+    {
+     "ttft_s": 0.19,
+     "tokens": 512,
+     "decode_tps": 75.1,
+     "error": null
+    },
+    {
+     "ttft_s": 0.55,
+     "tokens": 512,
+     "decode_tps": 79.0,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 1,
+   "wall_s": 8.1,
+   "total_tokens": 963,
+   "total_tps": 118.5,
+   "clients": [
+    {
+     "ttft_s": 0.81,
+     "tokens": 451,
+     "decode_tps": 67.7,
+     "error": null
+    },
+    {
+     "ttft_s": 0.32,
+     "tokens": 512,
+     "decode_tps": 65.4,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 56
+}

@@ -160,11 +160,14 @@ Upstream (niko1221) on this box loses at every concurrency: single stream ~45% s
 | CPU overclock (PBO/CO) | +1.5-3% decode | BIOS |
 | VRAM headroom | ~1 GB unused (551 MiB main with the default 700 MiB reserve, 427 MiB second): ~500 more experts | `--vram-reserve-mib`, test |
 | 4th RAM stick | 32 GB more room (Q4, more at once); no decode gain expected for IQ3_S (the pool is not RAM-bound) | hardware |
+| **3rd card + decode layer split in the fork** | C=1 ~+30-35% (all of IQ3_S in VRAM) | hardware + ~1 week |
+| two requests in flight on the layer split | C=2 up to ~1.5-1.7x total on 2 cards, MTP per request | ~1 more week |
 | batching in the fork (C>=2) | C=2 ~1.35x total short / ~1.2x at 40K; C=4 ~1.65x / ~1.35x | several days of engine work |
-| TP=2 | C=1 +25-35% (estimate; P2P works, 11-21 us one-way pushes) | weeks |
+| TP=2 | revised: C=1 ~+10-15% with today's misses; ~+25% over the layer split with all experts in VRAM | weeks |
 | 3rd card for Q4 | Q4 is CPU-miss-bound on 2 cards | hardware |
 
-Designs and the measured cost model: `docs/OVERNIGHT-2026-10-26.md`. MoE batching scales worse than the dense 27B
+Multi-GPU findings and the plan (TP verdict, upstream's layer split measured, layer split + concurrency):
+`docs/MULTI-GPU-PLAN-2026-10-26.md`. Batching designs and the measured cost model: `docs/OVERNIGHT-2026-10-26.md`. MoE batching scales worse than the dense 27B
 on vLLM because rows rarely share experts (~1.4 rows per distinct expert per window).
 
 ## Files

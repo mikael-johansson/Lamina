@@ -6,6 +6,8 @@ This is the `custom` branch of the eddoursul fork plus our work for the ada box 
 - **[Status report](ada/README.md)**: setup, configs, current speeds, where the time goes, what was tried, next steps.
 - [Overnight optimization report, 2026-10-26](ada/docs/OVERNIGHT-2026-10-26.md): the prefetch finding, prefill
   analysis, batching and TP=2 designs.
+- [Multi-GPU findings and plan, 2026-10-26](ada/docs/MULTI-GPU-PLAN-2026-10-26.md): TP verdict, upstream's
+  layer split measured, the plan for a decode layer split and two requests in flight.
 - [Running plan and notes](ada/docs/PLAN.md) · [First 2x3090 analysis, 2026-10-23](ada/docs/strata-2x3090-96gb-analysis-2026-10-23.md)
 - [Server configs](ada/configs/) (API key redacted) · [`strata.sh`](ada/strata.sh) start/stop script
 - [Benchmark tools](ada/bench/) and [results of every run](ada/bench/results/)

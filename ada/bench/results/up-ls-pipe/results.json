@@ -1,0 +1,73 @@
+{
+ "tag": "up-ls-pipe",
+ "args": [
+  "--pack",
+  "/d/ssd_128/strata-upstream/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--ple-gguf",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/upstream/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "auto",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--mtp",
+  "/d/ssd_128/strata-upstream/mtp/rt",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-resident",
+  "32768",
+  "--pipeline-windows",
+  "2"
+ ],
+ "env": null,
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 3.7,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 157.4,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 175.0,
+   "draft": [
+    512,
+    419
+   ],
+   "tiers": null,
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like 'P3DT4H5M', 'PT1H', 'P1Y2M3D', etc.\n    Note: Years and months are approximated as 365 days and 30 days respectively.\n\n    >>> parse_iso_du"
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 20.0,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 2576.6,
+   "prompt_s": 15.7,
+   "gen_n": 674,
+   "decode_tps": 154.6,
+   "draft": [
+    542,
+    401
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": "Let me check the current state of the tests more carefully \u2014 maybe some test files were updated. Let me search for `Starred()` and `Genres` usage across all test files:"
+  }
+ ],
+ "ready_s": 40
+}

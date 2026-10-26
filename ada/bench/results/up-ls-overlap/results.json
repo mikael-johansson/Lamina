@@ -1,0 +1,73 @@
+{
+ "tag": "up-ls-overlap",
+ "args": [
+  "--pack",
+  "/d/ssd_128/strata-upstream/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--ple-gguf",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/upstream/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "auto",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--mtp",
+  "/d/ssd_128/strata-upstream/mtp/rt",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-resident",
+  "32768"
+ ],
+ "env": {
+  "STRATA_SPLIT_OVERLAP": "1"
+ },
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 3.7,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 130.4,
+   "prompt_s": 0.4,
+   "gen_n": 600,
+   "decode_tps": 177.8,
+   "draft": [
+    488,
+    419
+   ],
+   "tiers": null,
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string and return the total number of seconds.\n\n    Supports formats like 'P3DT4H5M', 'PT1H', 'P1Y2M3D', etc.\n    Note: Years are approximated as 365 days, months as 30 days.\n\n    >>> parse_iso"
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 20.0,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 2630.0,
+   "prompt_s": 15.3,
+   "gen_n": 679,
+   "decode_tps": 145.5,
+   "draft": [
+    510,
+    398
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": "The test fixtures don't yet show `Genres` on albums. Let me check the actual upstream state and look at the rest of the relevant code \u2014 migrations, subsonic controllers, and search for `GetStarred` usages:"
+  }
+ ],
+ "ready_s": 40
+}
