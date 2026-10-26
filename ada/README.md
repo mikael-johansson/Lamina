@@ -181,7 +181,9 @@ on vLLM because rows rarely share experts (~1.4 rows per distinct expert per win
   `bench/kbench.cpp` + `kbench.sh`: the CPU expert kernels alone, per format, cache vs RAM, 1-8 threads; `bench/extract_requests.py`: builds the request index from
   the vLLM logs (only request bodies).
 - `bench/results/<run>/`: `results.json` / `load.json` of every run (server logs and config copies left out).
-- `docs/`: the overnight report, the running plan (`PLAN.md`), the first 2x3090 analysis.
+- `bench/kernels/`: GPU kernel profiling: the CUPTI tracer (`ktrace`), timeline/gap scripts, the standalone kernel
+  benchmark `gk` (safe under Nsight Compute), `floor.cu`; see `docs/KERNEL-PROFILE-2026-10-26.md`.
+- `docs/`: the overnight report, the running plan (`PLAN.md`), the first 2x3090 analysis, the kernel profile.
 - Experiments: `STRATA_HOT_SPLIT=f`, `STRATA_GPU2_PROF=1`, `STRATA_GPU2_ARM=1`, `STRATA_POOL_TIMELINE=<csv>`; build with
   `cmake --build build --target strata`.
 
