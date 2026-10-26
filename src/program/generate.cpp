@@ -1558,15 +1558,16 @@ int main(int argc, char** argv) {
         o.second_gpu = -1;
         o.adapt_every = 0;
     }
-    // --decode-split: each GPU's tier holds its own layers' experts, the whole head is on each, and the tiers stay as
-    // the profile filled them (an adaptive tier would move experts of either GPU's layers anywhere)
+    // --decode-split: each GPU's tier holds its own layers' experts and the whole head is on each.  The tiers adapt
+    // (each within its layers: a move stays in its layer, and each GPU's slots are its layers'), between windows
+    // (split_adapt in --serve); STRATA_SPLIT_NOADAPT=1 keeps them as the profile filled them
     if (o.decode_split > 0) {
         if (o.second_gpu < 0 || o.spec < 2) {
             std::fprintf(stderr, "strata generate: --decode-split needs --second-gpu and --spec\n");
             return 2;
         }
         o.head_split = 0.0;
-        o.adapt_every = 0;
+        if (std::getenv("STRATA_SPLIT_NOADAPT") != nullptr || !o.serve) o.adapt_every = 0;
         o.second_gpu_prefetch_mb = 0.0;
         o.prompt_split = o.decode_split;   // every prompt in the same two stages, on the decode split's own state
         // --batch: each batch slot's windows and drafter live outside the caches (their sessions are lent from them):
@@ -3367,10 +3368,11 @@ int main(int argc, char** argv) {
             }
             {   // the rest in empty slots (without the adaptive tier only the prompt path's loans use them)
                 uint64_t round = 0;
-                for (int64_t l = 0; l < g.n_layers; ++l)
+                const int64_t l_lo = split_at > 0 ? split_at : 0;   // --decode-split: the second stage's layers
+                for (int64_t l = l_lo; l < g.n_layers; ++l)
                     round += (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l));
                 for (uint64_t q = (budget - used) / round; q > 0; --q)
-                    for (int64_t l = 0; l < g.n_layers; ++l) {
+                    for (int64_t l = l_lo; l < g.n_layers; ++l) {
                         sizes.push_back((int64_t) lay.blob_bytes(l));
                         empty2.push_back((int32_t) l);
                     }
@@ -3576,6 +3578,25 @@ int main(int argc, char** argv) {
     tier.set_wait(drive.burst);
     tier.set_decay(o.adapt_decay);
     tier2.set_decay(o.adapt_decay);
+    // --decode-split: none of the in-window pumps (a split window's tail is its first stage's, while the second stage
+    // still reads its GPU's slots).  The tiers' moves go out between windows (split_adapt in --serve), once both
+    // stages' work is done: whole moves, each resident evicted as its copy is sent, on a stream of each GPU's own
+    cudaEvent_t split_ev1 = nullptr, split_ev2 = nullptr;
+    cudaStream_t split_st1 = nullptr, split_st2 = nullptr;
+    if (o.decode_split > 0 && tier.on()) {
+        drive.tier1 = nullptr;
+        drive.tier2 = nullptr;
+        cudaStreamCreateWithFlags(&split_st1, cudaStreamNonBlocking);
+        cudaEventCreateWithFlags(&split_ev1, cudaEventDisableTiming);
+        tier.set_paced(split_ev1);
+        if (tier2.on()) {
+            cudaSetDevice(o.second_gpu);
+            cudaStreamCreateWithFlags(&split_st2, cudaStreamNonBlocking);
+            cudaEventCreateWithFlags(&split_ev2, cudaEventDisableTiming);
+            cudaSetDevice(o.main_gpu);
+            tier2.set_paced(split_ev2);
+        }
+    }
     drive.n_layers = g.n_layers;
     drive.ring_us.assign((size_t) ((strata::kernels::kVerifyMaxT + 1) * g.n_layers), 0.0);
     if (!o.no_capture && !o.no_token_graph && layer_dump == nullptr && half_dump == nullptr &&
@@ -4411,6 +4432,33 @@ int main(int argc, char** argv) {
             cudaStreamCreateWithFlags(&copy2, cudaStreamNonBlocking);
             cudaSetDevice(o.main_gpu);
         }
+        // --decode-split's adaptive tiers, after a solo window (both stages done, nothing reads the slots): the moves
+        // landed since are admitted, up to STRATA_SPLIT_ADAPT_MB (4) of each GPU's queued moves go out, their copies
+        // beside the next windows (an evicted expert is a miss at once, a new one resident only once its copy has
+        // landed); every --adapt-every windows the next ranking runs on the adapt thread beside the draft (joined
+        // after it, before the next window reads the residency)
+        const uint64_t split_budget = [] {
+            const char* e = std::getenv("STRATA_SPLIT_ADAPT_MB");
+            return (uint64_t) ((e != nullptr ? std::atof(e) : 4.0) * 1048576.0);
+        }();
+        int64_t split_windows = 0;
+        auto split_adapt = [&](std::string& e) -> bool {
+            if (split_ev1 == nullptr) return true;
+            tier.apply_pending(false);
+            tier2.apply_pending(false);
+            uint64_t sent = 0;
+            cudaEventRecord(split_ev1, split_st1);
+            if (!tier.pump(split_budget, sent, e)) return false;
+            if (tier2.on()) {
+                cudaSetDevice(dev2);
+                cudaEventRecord(split_ev2, split_st2);
+                cudaSetDevice(o.main_gpu);
+                if (!tier2.pump(split_budget, sent, e)) return false;
+            }
+            // the `adapt` closure: both tiers ranked on the counts (pump_gap is a no-op without drive.tier2)
+            if (++split_windows % o.adapt_every == 0 && !drive.d.usage.empty()) drive.start_adapt();
+            return true;
+        };
         // The slots' sessions live in a region of each GPU's expert cache (on the main GPU below the elastic K/V's room
         // for the whole context under the prompt path's loan, on the second below its prompt path's loan), laid out once
         // (the windows' graphs bake the addresses in) and lent as far as it is used.  Their K/V is paged: one pool of
@@ -5535,8 +5583,8 @@ int main(int argc, char** argv) {
                 drive.d.failed = false;
                 drive_window(&drive, T);
                 tr("window", p, T);
-                drive.adapt_next = !drive.d.usage.empty() && ((rounds + 1) % o.adapt_every) == 0;
-                drive.flush_next = !drive.d.usage.empty() && ((rounds + 2) % o.adapt_every) == 0;
+                drive.adapt_next = !drive.d.usage.empty() && split_ev1 == nullptr && ((rounds + 1) % o.adapt_every) == 0;
+                drive.flush_next = !drive.d.usage.empty() && split_ev1 == nullptr && ((rounds + 2) % o.adapt_every) == 0;
                 if (!st.run(T, window.data(), p, outv.data(), err) || drive.d.failed) {
                     drive.join_adapt();
                     report(drive.d.failed && drive.d.fail ? drive.d.fail : err);
@@ -5547,6 +5595,10 @@ int main(int argc, char** argv) {
                     poison_at = p + r;
                     finish = "nonfinite";
                     break;
+                }
+                if (!split_adapt(err)) {
+                    report("the split's adaptive tiers: " + err);
+                    return 1;
                 }
                 // score=: the first window's row is the distribution right after the prompt; the candidates'
                 // log-probabilities go out as one `LP id:logprob ...` line before the first `T` (an `LP` alone when
@@ -5664,6 +5716,12 @@ int main(int argc, char** argv) {
                         prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) reuse, (long long) (hits1 - hits0), (long long) (look1 - look0));
             std::fflush(stdout);
+            // batch slots lend cache slots while they run (their pages grow): no move of the split's tiers may be left
+            // queued for one of them
+            if (split_ev1 != nullptr && !slots.empty()) {
+                tier.apply_pending(true);
+                tier2.apply_pending(true);
+            }
             if (admit >= 0) {   // BGEN: on in the slot from the state the prompt and its first token left
                 BatchSlot& b = *slots[(size_t) admit];
                 bool cont = std::strcmp(finish, "length") == 0 && poison_at < 0 && produced_n >= 1 && admit_max > 1 &&

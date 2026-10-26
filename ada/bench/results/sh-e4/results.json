@@ -1,0 +1,217 @@
+{
+ "tag": "sh-e4",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/mikaeljo/git/strata/eddoursul/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "4",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "23",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0",
+  "--decode-split",
+  "23"
+ ],
+ "env": {
+  "STRATA_SPLIT_ADAPT_MB": "2"
+ },
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 3.8,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 155.5,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 171.2,
+   "draft": [
+    490,
+    420
+   ],
+   "tiers": null,
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "thinking",
+   "wall_s": 6.2,
+   "error": null,
+   "prompt_n": 75,
+   "cache_n": 0,
+   "prefill_tps": 366.6,
+   "prompt_s": 0.2,
+   "gen_n": 1010,
+   "decode_tps": 168.0,
+   "draft": [
+    822,
+    659
+   ],
+   "tiers": null,
+   "tools": [],
+   "text": "**Proof.** Suppose, for contradiction, that there are only finitely many primes congruent to \\(3 \\pmod 4\\). List them as\n\n\\[\np_1,p_2,\\dots,p_n.\n\\]\n\nLet\n\n\\[\nN = 4p_1p_2\\cdots p_n - 1.\n\\]\n\nThen\n\n\\[\nN \\equiv -1 \\equiv 3 \\pmod 4.\n\\]\n\nSince \\(N\\) is odd, every prime divisor of \\(N\\) is odd, hence is cong"
+  },
+  {
+   "name": "py-small",
+   "wall_s": 9.6,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 3321.1,
+   "prompt_s": 6.6,
+   "gen_n": 578,
+   "decode_tps": 190.9,
+   "draft": [
+    472,
+    380
+   ],
+   "tiers": null,
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "opencode-30k",
+   "wall_s": 17.4,
+   "error": null,
+   "prompt_n": 48621,
+   "cache_n": 0,
+   "prefill_tps": 3846.4,
+   "prompt_s": 12.6,
+   "gen_n": 909,
+   "decode_tps": 191.1,
+   "draft": [
+    769,
+    588
+   ],
+   "tiers": null,
+   "tools": [
+    "write"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 14.5,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3647.5,
+   "prompt_s": 11.1,
+   "gen_n": 686,
+   "decode_tps": 197.4,
+   "draft": [
+    557,
+    447
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash",
+    "Bash"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 22.6,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4545.4,
+   "prompt_s": 19.8,
+   "gen_n": 512,
+   "decode_tps": 190.5,
+   "draft": [
+    393,
+    317
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch explicitly updates are failing. To rigorously verify that the patched tests pass with my source changes, I'll apply the test-only portion of the PR diff to a **copy** of the repository (leaving the test files in /app untouched):"
+  },
+  {
+   "name": "cc-80k-next",
+   "wall_s": 2.8,
+   "error": null,
+   "prompt_n": 1010,
+   "cache_n": 90044,
+   "prefill_tps": 1071.3,
+   "prompt_s": 0.9,
+   "gen_n": 401,
+   "decode_tps": 215.0,
+   "draft": [
+    342,
+    281
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 32.6,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4597.7,
+   "prompt_s": 31.7,
+   "gen_n": 147,
+   "decode_tps": 192.1,
+   "draft": [
+    143,
+    116
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 30
+}

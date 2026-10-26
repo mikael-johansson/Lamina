@@ -175,7 +175,7 @@ admission copy fix (a second-GPU copy during another slot's graph capture took t
 | --- | --- | --- |
 | ~~CPU pool on the SMT siblings~~ | tried (`STRATA_POOL_SMT=1`): kbench +5-7%, but the engine -1.5% (small pool calls, more sync); retest with PBO | done, off |
 | overlap / shrink MTP drafting | drafting is 0.9 ms of a 14.5 ms window, serial: C=1 up to ~+3-5% | 1-3 days |
-| per-card adaptive expert tier on the split | the split runs on the fixed learned profile; production's tier follows a conversation: long conversations a few % | 1-2 days |
+| ~~per-card adaptive expert tier on the split~~ | done: content the profile does not fit (real use) ~12% less total time, +20% decode; batch C=1/2/4 +7/+6/+12% | done |
 | short-prompt prefill on the split | prompts <=13K read 15-30% slower split (the second card streams experts it lacks): copy them ahead | 1-2 days |
 | CPU kernels: per-format decode choice on Zen 3 | the gathered IQ3_S decode +22% for 2-token rows; the pool's experts get ~1.1 tokens: <1% | hours |
 | CPU kernels: a cheaper lossless layout (e.g. IQ2_S indices pre-expanded) | fewer uops a weight helps while power-bound; costs RAM bytes (the pool has ~25% RAM headroom); unknown, maybe +5-15% pool | days, speculative |

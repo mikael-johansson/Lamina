@@ -19,7 +19,8 @@ case "$1" in
   stop)
     pkill -f '[s]erve/server.py --engine strata' && echo stopping
     while pgrep -f '[b]uild/strata[.a-z0-9-]* --serve' >/dev/null; do sleep 1; done; echo stopped ;;
-  status) pgrep -af '[s]erve/server.py --engine strata' | cut -c1-160 || echo "not running" ;;
+  status) if pgrep -af '[s]erve/server.py --engine strata' >/dev/null; then
+            pgrep -af '[s]erve/server.py --engine strata' | cut -c1-160; else echo "not running"; fi ;;
   log) tail -f strata-*.server.log ;;
   *) echo "usage: $0 start [config] | stop | status | log" ;;
 esac

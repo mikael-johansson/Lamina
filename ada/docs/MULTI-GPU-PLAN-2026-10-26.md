@@ -179,3 +179,28 @@ Geometric mean over the 8 requests, three interleaved rounds each (results `c4-r
 Per request -6% to +8%, partly because the outputs differ (a different window size verifies other drafts).  The
 direct code prompt (same tokens): spec 4 225.1 / 224.3, spec 5 219.5 / 220.4 (-2%); spec 5 accepts all 4 drafts in
 83 of 159 windows, but a 5-token window costs more.  Kept spec 4.
+
+### The split's adaptive tiers (2026-10-26, evening)
+
+In real use the split ran on the learned profile with its tiers fixed (`--decode-split` forced `--adapt-every 0`):
+one 8,563-token answer hit the cache 81.3% and decoded at 90 tok/s, both GPUs 40-60% busy waiting on the CPU.  Now
+each GPU's tier adapts within its own layers (a move stays in its layer, and the second GPU's empty slots are now
+only its own layers').  None of the in-window machinery (a split window's tail is its first stage's, while the
+second stage still reads its slots): after each solo window, with both stages done, the landed moves are admitted
+and up to `STRATA_SPLIT_ADAPT_MB` (4) of each GPU's queued moves go out (paced, each resident evicted as its copy is
+sent, the copies beside the next windows); the ranking runs on the adapt thread beside the draft.  While batch
+slots run nothing adapts, and a solo request ends with the tiers flushed (slots lend cache slots as they grow).
+`STRATA_SPLIT_NOADAPT=1` restores the fixed tiers.
+
+The corpus through the server (C=1, `ada/bench/results/ad-*`, `sh-*`), the same binary with and without:
+
+| profile | hit rates | decode tok/s geomean | total time (prompt + decode, the same tokens) |
+| --- | --- | --- | --- |
+| learned (built from this corpus: fits it) | ~99% both | 225.6 off, 206.5 on | 113.6 s off, 112.6 on (-1%) |
+| shipped generic (does not fit: real use) | 87-97% off, 95-99% on | 167.3 off, 200.3 on (+20%) | 116.0 s off, 107.9 on (-12%) |
+
+With adaptation the prompt path's lent slots are refilled through the tiers during the first windows instead of by
+a blocking copy, so prompts end 0.3-1.2 s sooner and the first windows are slower: decode tok/s understates it, the
+total time is the measure.  Ranking every 4 windows with 2 MB a window was worse on the generic profile (-9% total
+instead of -12%): the defaults stay.  Batch slots (4-slot config, short workload, `ad-load`): C=1 228.7, C=2 297.0,
+C=4 288.3 tok/s (fixed tiers before: 214.2 / 281.1 / 258.4), the long workload too, no error.

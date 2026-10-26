@@ -1,0 +1,216 @@
+{
+ "tag": "ad-e4",
+ "args": [
+  "--pack",
+  "/d/nvme_512/strata-data/packs/iq3_s",
+  "--native",
+  "/d/nvme_512/strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "--expert-profile",
+  "/d/nvme_512/strata-data/profiles/iq3_s-learned.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "16384",
+  "--feed-max",
+  "46",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--spec-lookup",
+  "16",
+  "--adapt-every",
+  "4",
+  "--mtp",
+  "/d/nvme_512/strata-data/mtp/rt-tuned",
+  "--max-context",
+  "262144",
+  "--kv",
+  "k8v4",
+  "--kv-grow",
+  "--hc-q8",
+  "--prompt-shift",
+  "0.2",
+  "--pcie-mode",
+  "kernel",
+  "--pcie-frac",
+  "0",
+  "--second-gpu",
+  "0",
+  "--main-gpu",
+  "1",
+  "--arena-place",
+  "--no-file-cache",
+  "--prompt-split",
+  "23",
+  "--second-gpu-reserve-mib",
+  "512",
+  "--vision",
+  "--second-gpu-prefetch-mb",
+  "0",
+  "--decode-split",
+  "23"
+ ],
+ "env": {
+  "STRATA_SPLIT_ADAPT_MB": "2"
+ },
+ "requests": [
+  {
+   "name": "code",
+   "wall_s": 2.8,
+   "error": null,
+   "prompt_n": 48,
+   "cache_n": 0,
+   "prefill_tps": 160.6,
+   "prompt_s": 0.3,
+   "gen_n": 600,
+   "decode_tps": 244.4,
+   "draft": [
+    474,
+    423
+   ],
+   "tiers": null,
+   "tools": [],
+   "text": "```python\nimport re\n\n\ndef parse_iso8601_duration(duration: str) -> int:\n    \"\"\"\n    Parse an ISO 8601 duration string into total seconds.\n\n    Supports formats like:\n    - P3DT4H5M (3 days, 4 hours, 5 minutes)\n    - PT1H30M (1 hour, 30 minutes)\n    - P1Y2M3D (1 year, 2 months, 3 days) \u2014 years and mo"
+  },
+  {
+   "name": "thinking",
+   "wall_s": 9.7,
+   "error": null,
+   "prompt_n": 75,
+   "cache_n": 0,
+   "prefill_tps": 248.8,
+   "prompt_s": 0.3,
+   "gen_n": 2000,
+   "decode_tps": 210.5,
+   "draft": [
+    1606,
+    1257
+   ],
+   "tiers": null,
+   "tools": [],
+   "text": "Assume \\(k\\) is a nonnegative integer, so primes of the form \\(4k+3\\) are exactly the primes congruent to \\(3 \\pmod 4\\).\n\n## Proof that there are infinitely many\n\nSuppose, for contradiction, that there are only finitely many primes of the form \\(4k+3\\). List them as\n\n\\[\np_1,p_2,\\dots,p_n.\n\\]\n\nLet\n\n\\"
+  },
+  {
+   "name": "py-small",
+   "wall_s": 9.4,
+   "error": null,
+   "prompt_n": 21997,
+   "cache_n": 0,
+   "prefill_tps": 3295.7,
+   "prompt_s": 6.7,
+   "gen_n": 578,
+   "decode_tps": 207.7,
+   "draft": [
+    486,
+    372
+   ],
+   "tiers": null,
+   "tools": [
+    "terminal"
+   ],
+   "text": ""
+  },
+  {
+   "name": "opencode-30k",
+   "wall_s": 16.4,
+   "error": null,
+   "prompt_n": 48621,
+   "cache_n": 0,
+   "prefill_tps": 4007.6,
+   "prompt_s": 12.1,
+   "gen_n": 864,
+   "decode_tps": 201.9,
+   "draft": [
+    677,
+    546
+   ],
+   "tiers": null,
+   "tools": [
+    "write"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-40k",
+   "wall_s": 14.3,
+   "error": null,
+   "prompt_n": 40368,
+   "cache_n": 0,
+   "prefill_tps": 3688.1,
+   "prompt_s": 10.9,
+   "gen_n": 645,
+   "decode_tps": 193.1,
+   "draft": [
+    514,
+    396
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": "The current test files still reference `GetStarred`, which is confusing. Let me check the actual upstream Navidrome PR this corresponds to, and look at the migrations and other callers:"
+  },
+  {
+   "name": "cc-80k",
+   "wall_s": 22.7,
+   "error": null,
+   "prompt_n": 90049,
+   "cache_n": 0,
+   "prefill_tps": 4557.6,
+   "prompt_s": 19.8,
+   "gen_n": 579,
+   "decode_tps": 202.1,
+   "draft": [
+    461,
+    380
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": "Only the two subtests that the PR's test patch explicitly updates are failing. To be sure that the patched tests pass against my source changes, I'll simulate the test patch on a **copy** of the repo (without touching the test files in /app):"
+  },
+  {
+   "name": "cc-80k-next",
+   "wall_s": 1.9,
+   "error": null,
+   "prompt_n": 1010,
+   "cache_n": 90044,
+   "prefill_tps": 1122.3,
+   "prompt_s": 0.9,
+   "gen_n": 204,
+   "decode_tps": 210.0,
+   "draft": [
+    176,
+    139
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  },
+  {
+   "name": "cc-150k",
+   "wall_s": 32.5,
+   "error": null,
+   "prompt_n": 145763,
+   "cache_n": 1588,
+   "prefill_tps": 4617.4,
+   "prompt_s": 31.6,
+   "gen_n": 148,
+   "decode_tps": 200.6,
+   "draft": [
+    146,
+    117
+   ],
+   "tiers": null,
+   "tools": [
+    "Bash"
+   ],
+   "text": ""
+  }
+ ],
+ "ready_s": 30
+}
