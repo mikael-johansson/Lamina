@@ -1,3 +1,19 @@
+## `ada` branch: Qwen3.8-Flash-Next on 2x RTX 3090
+
+This is the `custom` branch of the eddoursul fork plus our work for the ada box (Ryzen 7 5700X, 2x RTX 3090,
+96 GB DDR4). The original Strata README follows below.
+
+- **[Status report](ada/README.md)**: setup, configs, current speeds, where the time goes, what was tried, next steps.
+- [Overnight optimization report, 2026-10-26](ada/docs/OVERNIGHT-2026-10-26.md): the prefetch finding, prefill
+  analysis, batching and TP=2 designs.
+- [Running plan and notes](ada/docs/PLAN.md) · [First 2x3090 analysis, 2026-10-23](ada/docs/strata-2x3090-96gb-analysis-2026-10-23.md)
+- [Server configs](ada/configs/) (API key redacted) · [`strata.sh`](ada/strata.sh) start/stop script
+- [Benchmark tools](ada/bench/) and [results of every run](ada/bench/results/)
+- Engine experiments (opt-in, off by default): `STRATA_HOT_SPLIT`, `STRATA_GPU2_PROF`, `STRATA_GPU2_ARM`
+  in `src/core/second_gpu.cpp` and `src/program/generate.cpp`.
+
+---
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
