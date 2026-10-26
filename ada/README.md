@@ -96,12 +96,23 @@ One verify window (~4 tokens checked at once, short context) is ~15.7 ms
 | waiting for the second card | 0.3 (3.9 with prefetch on) |
 | other | ~1 |
 
-- The CPU's misses: ~1.6 missed experts per layer at 98-99% hit, computed by 6 pool workers at ~25 GB/s. That
-  rate is the pool's own limit, not the RAM's: per layer it reads only ~3 MB in two phases with a barrier each
-  (~130 us), too little work to reach the RAM's speed. Evidence: with every CPU expert moved into dual-channel
-  RAM (below) the pool's rate and the window time did not change (direct mode, ABAB: 24.5-25.2 GB/s, 15.5-15.6 ms
-  per window either way), and pool workers 5/7 were within noise. At 94-95% hit (agent traffic) there are ~3x as
-  many misses, so this share grows.
+- The CPU's misses: ~1.6 missed experts per layer at 98-99% hit, computed by 6 pool workers plus the host thread.
+  At 94-95% hit (agent traffic) there are ~3x as many, so this share grows. What limits them, measured:
+  - Per-layer timeline (`STRATA_POOL_TIMELINE=<csv>`, commit "pool timeline"; data in
+    `bench/results/cpu-pool/`), medians over the 74% of layers with CPU work: the router rings, the host plans
+    (2.7 us), gate/up (102 us), quantize (0.3 us), down (52 us), flag up: ~161 us (mean 189). All 7 threads join
+    each step within ~0.3 us and stay busy ~93 / ~50 us of it: no sync overhead. The GPU's own expert work covers
+    the first ~70 us, so it waits ~90 us per layer.
+  - Kernels alone (`bench/kbench`, `bench/kbench.out`): gate/up (IQ2_S, IQ3_XXS, IQ3_S) is compute-bound at
+    ~4.2-4.8 GB/s per core even with the weights in L2, near-linear in cores (8 cores ~30-34 GB/s); down
+    (IQ4_NL ~10, Q2_0 ~6 GB/s per core in cache) reaches the RAM's ~35 GB/s at 6-8 cores. In the engine the pool
+    gets ~20 GB/s on gate/up and ~26 on down: each thread's share of a layer is only 30-50 us of cold data.
+  - Not RAM-bound overall: with every CPU expert in dual-channel RAM (below) the window time did not change.
+  - Thread count (direct mode): 4 threads 8.0 ms pool / 176 tok/s, 5 7.3 / 186, 7 6.4 / 191-196.
+  - Kernel switches `STRATA_IQ_MT_MIN=1`, `STRATA_IQ256_GATHER=1`: within noise on the 5700X.
+  - So: more cores help gate/up (a 5900X/5950X: rough C=1 +8..+20%, less the two-chiplet sync cost); a CPU
+    overclock little (the cores already run ~4.5 of 4.65 GHz under this load: +1.5-3% with PBO/Curve
+    Optimizer); faster AVX2 IQ kernels or fewer misses (a 3rd GPU) more.
 - RAM layout (measured with `bench/membw`, root, by physical address): with 3 sticks, physical 0-32 GiB is
   single-channel (~22 GB/s on 8 cores) and 32-96 GiB dual-channel (~36 GB/s). `--arena-place` is meant to put
   the CPU's experts in the fast places, but it timed them on one core (the pool's host thread was already
@@ -145,6 +156,9 @@ Upstream (niko1221) on this box loses at every concurrency: single stream ~45% s
 
 | idea | expected | cost |
 | --- | --- | --- |
+| 5900X/5950X | gate/up is compute-bound: rough C=1 +8..+20% | hardware |
+| CPU overclock (PBO/CO) | +1.5-3% decode | BIOS |
+| VRAM headroom | ~1 GB unused (551 MiB main with the default 700 MiB reserve, 427 MiB second): ~500 more experts | `--vram-reserve-mib`, test |
 | 4th RAM stick | 32 GB more room (Q4, more at once); no decode gain expected for IQ3_S (the pool is not RAM-bound) | hardware |
 | batching in the fork (C>=2) | C=2 ~1.35x total short / ~1.2x at 40K; C=4 ~1.65x / ~1.35x | several days of engine work |
 | TP=2 | C=1 +25-35% (estimate; P2P works, 11-21 us one-way pushes) | weeks |
@@ -160,11 +174,12 @@ on vLLM because rows rarely share experts (~1.4 rows per distinct expert per win
 - `bench/bench.py`: real recorded requests through the server (`corpus.json`); `bench/load.py`: C concurrent
   clients; `bench/concurrency.sh`: fork vs upstream matrix; `bench/trace_run.py` + `bench/route_analysis.py`:
   expert-routing traces and the batching simulation; `bench/membw.c`: RAM read speed per physical GiB (root);
-  `bench/ram_offline.sh`: takes a physical range out of use (memory hotplug); `bench/extract_requests.py`: builds the request index from
+  `bench/ram_offline.sh`: takes a physical range out of use (memory hotplug);
+  `bench/kbench.cpp` + `kbench.sh`: the CPU expert kernels alone, per format, cache vs RAM, 1-8 threads; `bench/extract_requests.py`: builds the request index from
   the vLLM logs (only request bodies).
 - `bench/results/<run>/`: `results.json` / `load.json` of every run (server logs and config copies left out).
 - `docs/`: the overnight report, the running plan (`PLAN.md`), the first 2x3090 analysis.
-- Experiments (commit 1): `STRATA_HOT_SPLIT=f`, `STRATA_GPU2_PROF=1`, `STRATA_GPU2_ARM=1`; build with
+- Experiments: `STRATA_HOT_SPLIT=f`, `STRATA_GPU2_PROF=1`, `STRATA_GPU2_ARM=1`, `STRATA_POOL_TIMELINE=<csv>`; build with
   `cmake --build build --target strata`.
 
 Not in git: the API key, model files and packs, `deps/`, the upstream clone (`~/git/strata/upstream`), server

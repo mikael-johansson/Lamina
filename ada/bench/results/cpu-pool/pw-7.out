@@ -1,0 +1,40 @@
+speculation              175 rounds of 4, drafts accepted 426 of 486 (0.877), 3.43 tokens per round
+window sizes             T1:8 T2:9 T3:5 T4:151 T5:0 T6:0 T7:0 T8:2  (min draft probability 0.50)
+accepted per round       0:17 1:19 2:14 3:124 4:0 5:0 6:0 7:1
+prompt lookup            2 windows of its drafts, 7 of 14 accepted
+verify window            wait for rings 8.457  pool 6.261  host 0.206  commit 0.021 ms/round; CPU experts 1.59 distinct / 1.85 routed per layer
+pool multi               gate/up 3.901  quantize 0.017  down 2.131 ms/round; 25.3 GB/s over the rows phases; CPU pool call 6.256 ms/round; 0 worker sleeps; 0 thread moves
+dispatch                 plan 0.106  activation quantize 0.001  jobs 0.014  run 6.127 ms/round
+window profile           GPU time over 175 windows, ms per window: inputs 0.017, head 0.377, whole window 15.560; one stamp 0.78 us (each stage below includes one; the last two run from the ring beside the six before "rows + combine")
+  stage                  GDN us/layer QSA us/layer  ms per window
+  stamp gap                       0.8          0.8          0.037
+  HC read, mixer                 24.3         22.5          1.144
+  mixer                          80.9         84.3          3.924
+  HC read, FFN                   22.1         22.2          1.063
+  router, ring, hits             22.4         21.4          1.062
+  expert inputs                   2.6          2.2          0.122
+  VRAM experts                   67.1         70.2          3.258
+  wait for PCIe plan              1.2          1.3          0.061
+  PCIe experts                    0.9          0.9          0.041
+  wait for CPU                   79.4         72.3          3.727
+  wait for 2nd GPU                7.8          5.9          0.352
+  rows + combine                  6.9          7.0          0.333
+  last HC write                   0.8          1.2          0.042
+  shared expert, beside          40.4         44.7          1.991
+  2nd GPU rows, beside           93.6         85.1          4.389
+  wait for CPU, layers   <6 us 38%, <8 us 2%, <12 us 3%, <20 us 5%, <50 us 10%, <100 us 15%, more 28%
+adaptive tier            2887 experts swapped in and 290 into empty slots (every 1 rounds, 0.148 ms/round), 1284 moves dropped; 36.5 MB/round copied
+second GPU               391.59 routed entries and 312.98 experts per round in 43.86 layers (2.74 left to the CPU), its rows after the CPU's in 14.88 layers, 0.725 ms/round; 1362 experts swapped in and 240 into empty slots (0 still empty, 365 moves dropped; its copies between windows, 2.16 ms, at 12.9 GB/s); 0.00 experts per round prefetched, 0.00 of them used (0.000 ms/round of host time, 0 predictions waited for)
+routing concentration    1000:0.422 2000:0.581 4000:0.752 6000:0.852 8000:0.915 10000:0.955 12000:0.979 16000:0.999 20000:1.000  (top-N experts' share of 317280 routed entries)
+mtp                      1.220 ms/round drafting (174 rounds), 1200 MiB of VRAM
+prompt  : 248045 846 198 7734 264 12654 709 421 68434 449 21264 12 23 21 15 16 7836 886 1083 6283 11 440 6813 13 248046 198 248045 74455 198 248068 271 248069 271
+output  : 71093 12305 198 464 311 198 1445 18904 1120 11906 1358 727 4563 47988 23 21 15 16 24647 46541 2801 25 592 8 1411 11906 18078 5491 198 262 4071 198 262 14347 449 21264 12 23 21 15 16 7836 886 1083 2702 6283 13 198 1031 262 21264 12 23 21 15 16 7836 3443 25 387 7426 60 56 7426 60 44 7426 60 10284 7426 60 39 7426 60 44 7426 60 50 198 262 471 387 369 279 7836 2790 824 198 262 471 783 283 1578 11 380 283 3818 318 14372 345 681 414 283 2756 198 262 471 345 369 279 854 2790 824 198 262 471 462 283 3979 11 380 283 4276 318 10378 345 681 326 283 6283 6987 262 6817 25 21622 321 3818 513 9556 6921 430 220 18 21 20 2756 321 220 18 15 2756 15119 13 198 1031 262 17167 25 198 285 7836 2801 25 1473 21264 12 23 21 15 16 7836 886 13 198 1726 262 5019 25 198 285 10342 7836 303 6283 430 449 7308 11 466 2168 413 279 886 369 8060 13 198 262 4071 198 262 413 524 7836 2801 466 524 11074 46541 2801 11 592 1590 198 285 460 2168 6987 262 653 15011 1151 440 387 198 262 413 524 7836 2801 25322 482 47 33782 198 285 460 2168 6987 262 653 26907 1083 2321 321 854 5306 198 262 413 359 51 6 303 7836 2801 25 198 285 2321 10182 283 7836 2801 58 16 25 16523 2801 4989 482 51 49310 198 285 854 10182 283 7836 2801 58 16523 2801 4989 482 51 837 478 220 16 27365 198 262 745 25 198 285 2321 10182 283 7836 2801 58 16 27365 198 285 854 10182 283 3246 198 1031 262 653 14347 2321 919 25 783 11 380 11 414 198 262 1578 283 220 15 198 262 3818 283 220 15 198 262 2756 283 220 15 6987 262 413 2321 10182 25 198 285 653 13747 12261 1040 220 16 56 11 220 17 44 11 220 18 35 198 285 2321 20607 283 311 18351 2515 6 11189 67 10 2299 58 56 5886 2387 837 198 285 8798 283 2321 20607 36195 11631 10182 8 198 285 413 524 8798 25 198 309 460 2168 198 285 364 869 11 4821 303 8798 25 198 309 413 4821 606 359 56 1170 198 388 1578 283 514 3553 8 198 309 4265 4821 606 359 44 1170 198 388 3818 283 514 3553 8 198 309 4265 4821 606 359 35 1170 198 388 2756 283 514 3553 8 198 1031 262 653 14347 854 919 25 462 11 380 11 326 198 262 3979 283 220 15 198 262 4276 283 220 15 198 262 6283 283 220 15 6987 262 413 854 10182 25 198 285 854 20607 283 311 18351 2515 6 11189 67 10 2299 58 39 4671 2387 837 198 285 8798 283 854 20607 36195 9441 10182 8 198 285 413 524 8798 25 198 309 460 2168 198 285 364 869 11 4821 303 8798 25 198 309 413 4821 606 359 39 1170 198 388 3979 283 514 3553 8 198 309 4265 4821 606 359 44 1170 198 388 4276 283 514 3553 8 198 309 4265 4821 606 359 50 1170 198 388 6283 283 514 3553 8 198 1031 262 653 42368 3316 47095 198 262 653 220 16 1007 283
+decode                   600 tokens in 3046.7 ms  ->  196.94 tok/s
+prefill                  32 tokens in 262.8 ms  ->  121.79 tok/s  (time to first token 7972.6 ms)
+  per token              5.078 ms/token (WALL CLOCK: embed, layers, head, sample)
+  ple io: 11104 rows, 34.5% row-cache hits, 7272 SSD reads (30.4 MB), read p50 123 us p99 7657 us, blocked 45.108 ms total (submit 13.571 ms), cache 7272/1048576 rows
+  the CPU expert pool    6.256 ms/token over 48 layers (175 positions, 8400 dispatches)
+  pool phases              drain 6.050  close 0.000  ms/token
+  expert blobs           42959 blobs read
+  R4 overlap             0 of 0 layers the hit work was DONE when the pool returned
+  R4 expert-cache hits   233207 of 248752 = 0.9375      (0 admitted, 15545 refused, cache 100.0000% full)
