@@ -172,7 +172,7 @@ each (paged K/V), the checkpoint-restore crash fix, the GPU kernel profile (`doc
 
 | idea | expected | cost |
 | --- | --- | --- |
-| CPU pool on the SMT siblings too (14 threads on the pool's 7 cores) | kbench: +5-7% per kernel under the power limit -> pool ~+5%: C>=2 ~+2-4% | a switch in `pool.cpp` (one worker a core today) + server A/B |
+| ~~CPU pool on the SMT siblings~~ | tried (`STRATA_POOL_SMT=1`): kbench +5-7%, but the engine -1.5% (small pool calls, more sync); retest with PBO | done, off |
 | overlap / shrink MTP drafting | drafting is 0.9 ms of a 14.5 ms window, serial: C=1 up to ~+3-5% | 1-3 days |
 | per-card adaptive expert tier on the split | the split runs on the fixed learned profile; production's tier follows a conversation: long conversations a few % | 1-2 days |
 | short-prompt prefill on the split | prompts <=13K read 15-30% slower split (the second card streams experts it lacks): copy them ahead | 1-2 days |

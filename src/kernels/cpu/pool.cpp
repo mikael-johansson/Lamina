@@ -117,6 +117,17 @@ CorePlacement::CorePlacement(bool spare_first) : cores_(physical_cores()) {
     host_ = cores_.back().front();
     for (size_t c = spare_first && cores_.size() > 4 ? 1 : 0; c + 1 < cores_.size(); ++c)
         workers_.push_back(cores_[c].front());
+    // STRATA_POOL_SMT=1: a second worker on each worker core's sibling (not the host's core, not a spared one).  Under
+    // a package power limit the sibling fills the core's stalls for the same watts: on a 5700X at its 76 W, the
+    // gate/up kernels on 7 cores did 5-7% more with 14 threads (bench/kbench).
+    static const bool smt = [] { const char* e = std::getenv("STRATA_POOL_SMT"); return e != nullptr && e[0] == '1'; }();
+    if (smt) {
+        const size_t n = workers_.size();
+        for (size_t w = 0; w < n; ++w) {
+            const std::vector<int>& core = cores_[(size_t) core_of_[(size_t) workers_[w]]];
+            for (size_t k = 1; k < core.size(); ++k) workers_.push_back(core[k]);
+        }
+    }
 }
 
 // A quiet processor for a thread on `from`: the first of the quietest free core whose processors are all quiet, else

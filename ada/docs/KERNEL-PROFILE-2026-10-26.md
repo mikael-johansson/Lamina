@@ -159,7 +159,20 @@ Status: PBO and the CPU swap are on hold (no physical access for now); the guide
 weights in L3: IQ2_S gate/up 28.3 -> 30.4 GB/s (+7%), IQ3_XXS 26.3 -> 27.8 (+6%), IQ3_S 26.6 -> 28.3 (+6%), IQ4_NL down
 68.6 -> 72.0 (+5%), Q2_0 down 40.8 -> 43.9 (+7%).  The second hardware thread fills the core's stalls for the same
 watts.  The engine pins one worker a physical core (`pool.cpp`); adding the siblings is a small switch, then a
-server A/B at C=1/C=2 (the per-layer sync of 13 workers instead of 6 may eat part of it).  Not tried yet.
+server A/B at C=1/C=2 (the per-layer sync of 13 workers instead of 6 may eat part of it).
+
+Tried in the engine (`STRATA_POOL_SMT=1`: 12 workers on 1-6 and 9-14, the host on 7; outputs bitwise the same): it
+loses.  Direct C=1 decode 234.7 -> 232.0 tok/s, the pool's time a window 1.797 -> 1.930 ms (+7%).  Through the server
+(4-slot split config, short workload, 2 x 3 rounds each, interleaved): C=1 214.2 -> 210.6 (-1.7%), C=4 258.4 -> 254.8
+(-1.4%); C=2 lost a round to an engine fault unrelated to SMT (below), its clean rounds equal.  The pool's calls are
+small (about half an expert a token a layer): dispatch and sync over 12 workers cost more than the siblings add.  The
+switch stays, off by default: with more watts (PBO) the balance may move, worth one retest then.
+
+The engine fault: an admission into a batch slot copied the second GPU's layers on the legacy stream and waited with
+`cudaDeviceSynchronize`, both errors while another slot's thread records a window's graph on that device ("operation
+not permitted when stream is capturing"; the intermittent "copying the admission's state into batch slot" seen once
+before).  Fixed: those copies (and the copy back from an ended slot) run on a non-blocking stream of their own and wait
+for it alone.  24 rounds at C=2/C=4 afterwards without an error.
 
 Are the CPU kernels optimal?  Not provably.  They are the fork author's tuned multi-token AVX2 kernels (codebook
 decoded once per 32 values for every token, ggml's sign tricks, gathered variants per CPU); two rearrangements here

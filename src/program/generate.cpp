@@ -4402,6 +4402,15 @@ int main(int argc, char** argv) {
         std::thread s_first, s_second;
         Drive sdA, sdB;                  // each stage's pool user (the solo path keeps `drive`)
         const int dev2 = ver2 != nullptr ? dsplit.device() : -1;
+        // the copies between the main and the slots' sessions on the second GPU run on a stream of their own: the
+        // legacy stream and cudaDeviceSynchronize wait on every blocking stream of the device, which is an error while
+        // another slot's thread records a window's graph on one ("operation not permitted when stream is capturing")
+        cudaStream_t copy2 = nullptr;
+        if (dev2 >= 0) {
+            cudaSetDevice(dev2);
+            cudaStreamCreateWithFlags(&copy2, cudaStreamNonBlocking);
+            cudaSetDevice(o.main_gpu);
+        }
         // The slots' sessions live in a region of each GPU's expert cache (on the main GPU below the elastic K/V's room
         // for the whole context under the prompt path's loan, on the second below its prompt path's loan), laid out once
         // (the windows' graphs bake the addresses in) and lent as far as it is used.  Their K/V is paged: one pool of
@@ -5234,8 +5243,8 @@ int main(int argc, char** argv) {
                          cudaStreamSynchronize(main_stream) == cudaSuccess;
                     cudaSetDevice(dev2);
                     ok = ok && strata::core::session_copy_layers_mapped(from->ss2, from->map.data(), dsplit.session(), nullptr,
-                                                                         g, cells, L, g.n_layers, L, nullptr) &&
-                         cudaDeviceSynchronize() == cudaSuccess;
+                                                                         g, cells, L, g.n_layers, L, copy2) &&
+                         cudaStreamSynchronize(copy2) == cudaSuccess;
                     cudaSetDevice(o.main_gpu);
                     if (!ok) { report("copying a batch slot's sessions back"); return 1; }
                     pcache.forget();
@@ -5685,8 +5694,8 @@ int main(int argc, char** argv) {
                     cudaSetDevice(dev2);
                     if (step == nullptr &&
                         (!strata::core::session_copy_layers_mapped(dsplit.session(), nullptr, b.ss2, b.map.data(), g, p, L,
-                                                                    g.n_layers, L, nullptr) ||
-                         cudaDeviceSynchronize() != cudaSuccess))
+                                                                    g.n_layers, L, copy2) ||
+                         cudaStreamSynchronize(copy2) != cudaSuccess))
                         step = "the second GPU's layers";
                     b.B.set_sampling(req_sp);   // (penalties stay on the solo path)
                     cudaSetDevice(o.main_gpu);
