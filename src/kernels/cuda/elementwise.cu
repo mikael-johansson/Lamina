@@ -223,6 +223,15 @@ void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream) 
     check_launch("doorbell_wait");
 }
 
+__global__ void wait_mapped_u32_kernel(const volatile uint32_t* word, uint32_t want) {
+    while (*word != want) __nanosleep(64);
+    __threadfence_system();
+}
+void wait_mapped_u32(const uint32_t* word, uint32_t want, void* stream) {
+    wait_mapped_u32_kernel<<<1, 1, 0, (cudaStream_t) stream>>>((const volatile uint32_t*) word, want);
+    check_launch("wait_mapped_u32");
+}
+
 __global__ void copy_from_mapped_kernel(float4* __restrict__ dst, const volatile float4* src, int64_t n4) {
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (int64_t) gridDim.x * blockDim.x) {
         const float4 v = const_cast<const float4*>(src)[i];

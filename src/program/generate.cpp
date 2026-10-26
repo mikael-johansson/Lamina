@@ -772,6 +772,7 @@ bool drive_watch(void* user, std::string& err) {
 /// A window's last CPU rows are in (Verifier::set_tail).
 void drive_tail(void* user) {
     Drive* t = (Drive*) user;
+    if (t->d.gpu2 != nullptr) t->d.gpu2->disarm();   // STRATA_GPU2_ARM: no launch waits on it between windows
     t->tail_at = Clock::now();
     t->copies_end = t->tail_at;
     t->gap_open = true;
@@ -788,6 +789,7 @@ void drive_tail(void* user) {
 void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_tok, int64_t k,
                       float* out, int64_t layer) {
     Drive* t = (Drive*) user;
+    strata::core::SecondGpu::mark_dispatch();
     t->d.layers = layer;
     const Clock::time_point a = Clock::now();
     const size_t at = (size_t) (t->win_t * t->n_layers + std::min(layer, t->n_layers - 1));
@@ -2197,6 +2199,34 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: lower --max-context or close "
                                  "other programs that use the GPU\n");
     }
+    // STRATA_HOT_SPLIT=f (0 < f < 1, with --second-gpu, opt-in): the main GPU takes a share f of the profile's ranked
+    // pairs, spread over the ranking (with 0.5 every other one) instead of its top `slots`, and the second GPU fills
+    // from the whole ranking with the rest, so the two GPUs compute about f : 1-f of the hot routed work.  Only the
+    // main GPU's fill order changes (its slots are sized in that order below): `profile` itself (the adaptive tiers'
+    // ranks, the saved profile, the second GPU's fill) keeps the ranking.
+    std::vector<std::pair<int32_t, int32_t>> hot_split;
+    const std::vector<std::pair<int32_t, int32_t>>* fill = &profile;
+    if (const char* hs = std::getenv("STRATA_HOT_SPLIT");
+        hs != nullptr && o.second_gpu >= 0 && !profile.empty() && o.vram_pin_gib <= 0 && o.second_gpu_pin_gib <= 0) {
+        const double f = std::atof(hs);
+        if (f > 0.0 && f < 1.0) {
+            std::vector<std::pair<int32_t, int32_t>> rest;
+            double acc = 0.0;
+            for (const auto& pr : profile) {
+                acc += f;
+                if (acc >= 1.0) {
+                    acc -= 1.0;
+                    hot_split.push_back(pr);
+                } else {
+                    rest.push_back(pr);
+                }
+            }
+            hot_split.insert(hot_split.end(), rest.begin(), rest.end());
+            fill = &hot_split;
+            std::fprintf(stderr, "strata generate: STRATA_HOT_SPLIT=%.2f: the main GPU takes every %.2f-th expert of "
+                                 "the profile's ranking, the second GPU the rest\n", f, 1.0 / f);
+        }
+    }
     // plan v0.3 P6: a native pack's blobs differ per layer, so with a profile its slots are sized per pair: the
     // same VRAM holds ~30% more IQ3_XXS experts than slots of the largest blob would
     std::vector<int64_t> sized_slots;
@@ -2208,7 +2238,7 @@ int main(int argc, char** argv) {
         uint64_t used = 0;
         size_t free_room = free_b > ((size_t) o.vram_reserve_mib << 20) ? free_b - ((size_t) o.vram_reserve_mib << 20) : 0;
         const uint64_t cap = std::min<uint64_t>(budget, (uint64_t) free_room);
-        for (const auto& pr : profile) {
+        for (const auto& pr : *fill) {   // in the order the profile fill below admits them
             const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
             if (used + b > cap) break;
             used += b;
@@ -2318,7 +2348,8 @@ int main(int argc, char** argv) {
         start_ple_ram();
     }
     int64_t prefilled = 0;
-    if (!profile.empty() && srcp != nullptr) {
+    if (!fill->empty() && srcp != nullptr) {
+        const auto& profile = *fill;   // the fill order the slots were sized in (the ranking unless STRATA_HOT_SPLIT)
         const int64_t want = std::min<int64_t>((int64_t) profile.size(), xcache.slots());
         std::vector<std::array<int32_t, 3>> from_model;   // (slot, layer, expert): only in VRAM, read from the model
         for (int64_t i = 0; i < want; ++i) {
@@ -3047,7 +3078,8 @@ int main(int argc, char** argv) {
             const uint64_t budget = o.second_gpu_gib > 0 ? (uint64_t) (o.second_gpu_gib * 1073741824.0)
                                                          : (free_b > reserve ? (uint64_t) free_b - reserve : 0);
             uint64_t used = 0;
-            for (size_t i = (size_t) prefilled; i < profile.size(); ++i) {
+            // with STRATA_HOT_SPLIT the first GPU's experts are spread over the ranking: walk all of it
+            for (size_t i = hot_split.empty() ? (size_t) prefilled : 0; i < profile.size(); ++i) {
                 const auto& pr = profile[i];
                 if (host_res[(size_t) (pr.first * g.n_expert + pr.second)] >= 0) continue;   // the first GPU holds it
                 const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));

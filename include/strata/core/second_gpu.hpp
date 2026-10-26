@@ -57,6 +57,17 @@ public:
     /// (n_embd floats, mapped host memory), and then `*flag` is set to `ring`.
     bool submit(int64_t layer, const uint8_t* x, int64_t x_stride, int n_tok, int64_t k, const int32_t* slots, const int32_t* starts,
                 const int32_t* entries, int n_groups, float* out, uint32_t* flag, uint32_t ring, std::string& err);
+    /// STRATA_GPU2_ARM=1 (opt-in): after each share the next layer's graph is launched behind a kernel that waits for
+    /// a word in mapped memory, so the next submit() only writes the plan and that word (the launch's latency, ~0.1 ms
+    /// a layer on this path, is taken while the GPU waits).  A submit the armed graph does not fit (another layer, a
+    /// prefetched part, more groups than its bucket) first releases it with an empty plan.  `disarm` releases it and
+    /// waits until it is done: the window's tail calls it, so nothing outside a window finds a launch waiting here.
+    void disarm();
+    /// STRATA_GPU2_PROF: the host's time at the start of the current layer's dispatch (drive_pool_multi sets it).
+    static void mark_dispatch();
+    bool armed() const { return arm_.on; }
+    int64_t arm_fast = 0, arm_missed = 0, miss_layer = 0, miss_pre = 0, miss_groups = 0, miss_fmt = 0;   ///< shares the armed graph took / armed graphs released empty
+
     /// False, with the reason, when its work so far failed; does not wait.
     bool healthy(std::string& err) const;
     /// Recorded after the last submitted share: the last work that may read its cache and prefetch slots.
@@ -84,6 +95,18 @@ private:
     // graph copies the plan and the activations in (the first launch of a layer)
     struct Graph { int gu, d, gu_act, d_act, groups, part; bool prep; cudaGraphExec_t exec; };
     std::vector<Graph> graphs_;
+    // the armed share (STRATA_GPU2_ARM): its layer, the graph waiting behind wait_mapped_u32(m_go_, seq), the event
+    // after it
+    struct Armed { bool on = false; int64_t layer = -1; int gu = 0, d = 0, gu_act = 0, d_act = 0; uint32_t seq = 0; };
+    Armed arm_;
+    bool arm_enabled_ = false;
+    int64_t n_layers_ = 0;
+    uint32_t seq_ = 0;
+    uint32_t *h_go_ = nullptr, *m_go_ = nullptr;
+    cudaEvent_t arm_ev_ = nullptr;
+    bool arm(int64_t layer, std::string& err);
+    void write_plan(int64_t layer, int n_tok, int64_t k, const int32_t* slots, const int32_t* starts,
+                    const int32_t* entries, int n_groups, float* out, uint32_t* flag, uint32_t ring, int ng[2]);
     // prefetch slots, their copy stream, and the event of the last copies
     static constexpr int kPrefetchMax = 16;
     uint8_t* d_pre_ = nullptr;
