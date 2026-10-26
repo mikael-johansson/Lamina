@@ -1,0 +1,122 @@
+{
+ "tag": "batch6",
+ "config": "../configs/fork-iq3_s-split-batch.json",
+ "parallel": 2,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 2.2,
+   "total_tokens": 512,
+   "total_tps": 230.7,
+   "clients": [
+    {
+     "ttft_s": 0.13,
+     "tokens": 512,
+     "decode_tps": 244.4,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 1,
+   "wall_s": 2.3,
+   "total_tokens": 512,
+   "total_tps": 226.2,
+   "clients": [
+    {
+     "ttft_s": 0.08,
+     "tokens": 512,
+     "decode_tps": 234.6,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 2,
+   "wall_s": 2.1,
+   "total_tokens": 412,
+   "total_tps": 198.8,
+   "clients": [
+    {
+     "ttft_s": 0.1,
+     "tokens": 412,
+     "decode_tps": 208.8,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 0,
+   "wall_s": 3.1,
+   "total_tokens": 1024,
+   "total_tps": 328.5,
+   "clients": [
+    {
+     "ttft_s": 0.1,
+     "tokens": 512,
+     "decode_tps": 170.1,
+     "error": null
+    },
+    {
+     "ttft_s": 0.32,
+     "tokens": 512,
+     "decode_tps": 182.6,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 1,
+   "wall_s": 4.0,
+   "total_tokens": 924,
+   "total_tps": 230.7,
+   "clients": [
+    {
+     "ttft_s": 0.23,
+     "tokens": 412,
+     "decode_tps": 140.8,
+     "error": null
+    },
+    {
+     "ttft_s": 0.41,
+     "tokens": 512,
+     "decode_tps": 142.3,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 2,
+   "wall_s": 3.5,
+   "total_tokens": 1024,
+   "total_tps": 293.0,
+   "clients": [
+    {
+     "ttft_s": 0.42,
+     "tokens": 512,
+     "decode_tps": 169.0,
+     "error": null
+    },
+    {
+     "ttft_s": 0.23,
+     "tokens": 512,
+     "decode_tps": 156.4,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 30
+}

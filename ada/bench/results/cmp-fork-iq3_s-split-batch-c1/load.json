@@ -1,0 +1,104 @@
+{
+ "tag": "cmp-fork-iq3_s-split-batch-c1",
+ "config": "../configs/fork-iq3_s-split-batch.json",
+ "parallel": 2,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 0,
+   "wall_s": 2.2,
+   "total_tokens": 512,
+   "total_tps": 235.5,
+   "clients": [
+    {
+     "ttft_s": 0.12,
+     "tokens": 512,
+     "decode_tps": 249.1,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 1,
+   "wall_s": 2.1,
+   "total_tokens": 512,
+   "total_tps": 238.9,
+   "clients": [
+    {
+     "ttft_s": 0.08,
+     "tokens": 512,
+     "decode_tps": 247.5,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 2,
+   "wall_s": 1.8,
+   "total_tokens": 451,
+   "total_tps": 249.8,
+   "clients": [
+    {
+     "ttft_s": 0.08,
+     "tokens": 451,
+     "decode_tps": 261.1,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 3,
+   "wall_s": 2.2,
+   "total_tokens": 512,
+   "total_tps": 237.5,
+   "clients": [
+    {
+     "ttft_s": 0.08,
+     "tokens": 512,
+     "decode_tps": 246.7,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 4,
+   "wall_s": 2.0,
+   "total_tokens": 512,
+   "total_tps": 252.8,
+   "clients": [
+    {
+     "ttft_s": 0.1,
+     "tokens": 512,
+     "decode_tps": 264.9,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 1,
+   "round": 5,
+   "wall_s": 2.0,
+   "total_tokens": 512,
+   "total_tps": 252.6,
+   "clients": [
+    {
+     "ttft_s": 0.08,
+     "tokens": 512,
+     "decode_tps": 262.3,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 30
+}

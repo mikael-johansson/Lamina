@@ -1,0 +1,74 @@
+{
+ "tag": "cmp-fork-iq3_s-tuned-c2",
+ "config": "../configs/fork-iq3_s-tuned.json",
+ "parallel": 1,
+ "rounds": [
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 0,
+   "wall_s": 4.5,
+   "total_tokens": 1024,
+   "total_tps": 228.9,
+   "clients": [
+    {
+     "ttft_s": 0.12,
+     "tokens": 512,
+     "decode_tps": 239.8,
+     "error": null
+    },
+    {
+     "ttft_s": 2.33,
+     "tokens": 512,
+     "decode_tps": 238.7,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 1,
+   "wall_s": 4.2,
+   "total_tokens": 958,
+   "total_tps": 229.2,
+   "clients": [
+    {
+     "ttft_s": 0.09,
+     "tokens": 446,
+     "decode_tps": 246.9,
+     "error": null
+    },
+    {
+     "ttft_s": 1.99,
+     "tokens": 512,
+     "decode_tps": 233.3,
+     "error": null
+    }
+   ]
+  },
+  {
+   "workload": "short",
+   "c": 2,
+   "round": 2,
+   "wall_s": 4.3,
+   "total_tokens": 1024,
+   "total_tps": 239.5,
+   "clients": [
+    {
+     "ttft_s": 2.27,
+     "tokens": 512,
+     "decode_tps": 254.8,
+     "error": null
+    },
+    {
+     "ttft_s": 0.09,
+     "tokens": 512,
+     "decode_tps": 245.6,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "ready_s": 30
+}

@@ -26,12 +26,14 @@ def main():
     ap.add_argument("config")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--no-trace", action="store_true", help="no routing dump (speed runs)")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text())
     run = HERE / "runs" / a.tag
     run.mkdir(parents=True, exist_ok=True)
     trace = run / "routing.bin"
-    cfg["args"] = cfg["args"] + ["--dump-routing", str(trace)]
+    if not a.no_trace:
+        cfg["args"] = cfg["args"] + ["--dump-routing", str(trace)]
     cfg["log"] = str(run / "engine.log")
     cfg.pop("vision", None)
     cfg["args"] = [x for x in cfg["args"] if x != "--vision"]
@@ -40,7 +42,7 @@ def main():
     bench.API_KEY = cfg.get("api_key")
     port = cfg["port"]
     repo = Path(cfg.get("cwd") or HERE.parent / "eddoursul")
-    env = dict(__import__("os").environ, STRATA_DECODE_TIMING="1")
+    env = dict(__import__("os").environ, **({} if a.no_trace else {"STRATA_DECODE_TIMING": "1"}))
     log = open(run / "server.log", "w")
     srv = subprocess.Popen([str(repo / ".venv/bin/python"), "serve/server.py", "--engine", "strata", "--config",
                             str(run / "config.json"), "--port", str(port)], stdout=log, stderr=subprocess.STDOUT,

@@ -142,3 +142,23 @@ commits apart).
 | fewer, fused kernels on the main card | unknown | attacks the same ~85 us/layer fixed cost TP cannot; needs a per-kernel profile (no nsys on the box) |
 | CPU overclock (PBO/CO) | +1.5-3% | cores already at ~4.5 of 4.65 GHz under this load |
 | VRAM headroom | small | ~1 GB unused: ~500 more experts |
+
+## Status at the end of 2026-10-26 (branch `layer-split`)
+
+Built: `--decode-split L` (balanced cards: each GPU its own layers' weights, experts and state; the head on the
+last, MTP on the first; prompts in two stages on the resident state; the prompt cache split-aware) and `--batch N`
+(the server's `"parallel"`): batch slots with BGEN / BT / BDONE / BSTOP, slot sessions in lent expert-cache slots,
+admissions read beside decoding slots. Config: `ada/configs/fork-iq3_s-split-batch.json` (port 8096).
+
+| | production | split + 2 batch slots |
+| --- | --- | --- |
+| short tasks, C=1 total | 223.5 tok/s | 244.8 |
+| short tasks, C=2 total | 231.2 (queued) | 316.4 |
+| 18 real requests, C=1 (shipped profile) | 171.1 | 167.6 |
+| prefill 22-146K tokens | 3,015-4,452 | 3,131-4,583 (-4..+4%) |
+| prefill <= 13K tokens | | -15..-30% (each stage streams its card's missing experts) |
+| two 49K prompts at once | ~26-28 s queued | 24.2 s; the other request decodes at ~47 tok/s during a read |
+
+Bit-exact against the unsplit engine (`STRATA_DSPLIT_NOHIT=1`, equal tiers). Limits: a slot holds 128K tokens
+(`STRATA_SLOT_CELLS`, 1.5 GB lent per slot); penalties and images on the solo path; the adaptive tier off in split
+mode; prompts are read one at a time. Next: slot state that grows with its conversation.
