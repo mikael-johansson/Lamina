@@ -63,7 +63,8 @@ public:
               int64_t window = 32768);
     /// A drafter for another sequence (--decode-split's second request): `base`'s weights and draft head, its own K/V
     /// over `ss`'s context, buffers and graphs.  `base` must outlive it.
-    bool load_shared(const MtpDrafter& base, SessionState& ss, int max_t, std::string& err);
+    bool load_shared(const MtpDrafter& base, SessionState& ss, int max_t, std::string& err,
+                     const QsaState* kv = nullptr);
     /// The prompt's length: the prompt's K/V skip the cells the attention window can never reach again.
     void set_prompt_len(int64_t n) { prompt_len_ = n; }
     /// The draft chain stops after `n` drafts (0: max_t - 1).
@@ -111,8 +112,9 @@ private:
     bool record_rest(int step_row, cudaStream_t cs, std::string& err);
     void norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs);
     bool capture_round(int T, std::string& err);
-    /// load's part after the weights: the K/V state, the buffers and the streams.
-    bool alloc_state(SessionState& ss, int64_t window, std::string& err);
+    /// load's part after the weights: the K/V state (`kv`: one the caller made, e.g. a batch slot's paged one), the
+    /// buffers and the streams.
+    bool alloc_state(SessionState& ss, int64_t window, std::string& err, const QsaState* kv = nullptr);
     bool shares_base_ = false;   // load_shared: the weights and the draft head are another drafter's
     bool capture_step(int j, std::string& err);
     cudaGraphExec_t step_exec_[9] = {};

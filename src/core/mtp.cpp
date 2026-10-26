@@ -184,7 +184,8 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     return true;
 }
 
-bool MtpDrafter::load_shared(const MtpDrafter& base, SessionState& ss, int max_t, std::string& err) {
+bool MtpDrafter::load_shared(const MtpDrafter& base, SessionState& ss, int max_t, std::string& err,
+                             const QsaState* kv) {
     g_ = base.g_;
     ss_ = &ss;
     max_t_ = max_t;
@@ -204,24 +205,28 @@ bool MtpDrafter::load_shared(const MtpDrafter& base, SessionState& ss, int max_t
         if (cudaMalloc(&proxy_scratch_, sb) != cudaSuccess) { err = "mtp: the draft head's scratch does not fit"; return false; }
         cudaMemset(proxy_scratch_, 0, sb);
     }
-    return alloc_state(ss, base.window_, err);
+    return alloc_state(ss, base.window_, err, kv);
 }
 
-bool MtpDrafter::alloc_state(SessionState& ss, int64_t window, std::string& err) {
+bool MtpDrafter::alloc_state(SessionState& ss, int64_t window, std::string& err, const QsaState* kv) {
     const ModelGeometry& g = *g_;
     const int max_t = max_t_;
     // ---- the layer's own K/V (dense attention: no indexer state is read), FP16 or INT8 (qsa_draft_kv_format)
     const strata::kernels::QsaShapes s = shapes_of(g);
-    const int64_t max_cells = ss.qsa_states[0].max_cells;
-    const uint64_t sb = qsa_state_bytes(g, max_cells, false, qsa_draft_kv_format());
-    if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
-    if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[0], qsa_draft_kv_format()) == 0) {
-        err = "mtp: state init failed";
-        return false;
+    const int64_t max_cells = kv != nullptr ? kv->max_cells : ss.qsa_states[0].max_cells;
+    if (kv != nullptr) {   // the caller's (its pools, page table and cells; the layer reads nothing else of it)
+        st_ = *kv;
+    } else {
+        const uint64_t sb = qsa_state_bytes(g, max_cells, false, qsa_draft_kv_format());
+        if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
+        if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[0], qsa_draft_kv_format()) == 0) {
+            err = "mtp: state init failed";
+            return false;
+        }
+        qsa_state_zero(st_, g, nullptr);
+        cudaDeviceSynchronize();
+        vram_ += sb;
     }
-    qsa_state_zero(st_, g, nullptr);
-    cudaDeviceSynchronize();
-    vram_ += sb;
 
     // ---- buffers
     window_ = (window > 0 && window < max_cells) ? window : 0;

@@ -282,6 +282,14 @@ uint64_t qsa_state_prompt_bytes(const ModelGeometry& g, int64_t max_cells, int64
                                 KvFormat kv);
 uint64_t qsa_state_prompt_init(const ModelGeometry& g, int64_t max_cells, int64_t first_page, bool indexer, KvFormat kv,
                                void* base, QsaState& st, void* stream);
+/// Batch slots' shared K/V (generate's --batch): a state whose pools hold `pool_pages` physical pages, shared by the
+/// same layer of every slot, and whose own page table maps its `cells` logical cells onto them (all to page 0 until
+/// the caller maps them), with its own indexer for them when `indexer`.  `share` null: the pools are carved here too
+/// (zeroed); else the state takes `share`'s.  Never elastic, no rotary tables.
+uint64_t qsa_state_paged_bytes(const ModelGeometry& g, int64_t cells, int64_t pool_pages, bool pools, bool indexer,
+                               KvFormat kv);
+uint64_t qsa_state_paged_init(const ModelGeometry& g, int64_t cells, int64_t pool_pages, bool indexer, KvFormat kv,
+                              void* base, QsaState& st, const QsaState* share, void* stream, bool zero = true);
 /// The attention kernels' view of the state's K/V pools (qsa_decode_attn.hpp).
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st);
 /// Appends n_tok cells in the state's format (graph-capturable): token t's step record at step + t * step_stride,

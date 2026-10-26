@@ -114,10 +114,18 @@ bool session_ckpt_load_layers(SessionState& s, const ModelGeometry& g, int64_t p
 /// Copies one QSA state's cells [0, cells) (and its indexer's state, when it has one) into another of the same layout
 /// on the same device (a second request's session starting from the first's prompt).
 bool qsa_copy_cells(const QsaState& from, QsaState& to, const ModelGeometry& g, int64_t cells, void* stream);
+/// The same between states whose page tables are `from_map` / `to_map` (host copies, logical page -> physical page;
+/// null: the identity), in runs of pages consecutive on both sides (generate's --batch slots: paged K/V).
+bool qsa_copy_cells_mapped(const QsaState& from, const int32_t* from_map, QsaState& to, const int32_t* to_map,
+                           const ModelGeometry& g, int64_t cells, void* stream);
 /// The same for a session's layers [lo, hi) at `cells`: their GDN states, QSA cells and indexers, the PLE's history and
 /// token window when layer 1 is among them; both sessions' states indexed from `first`.  Synchronous.
 bool session_copy_layers(const SessionState& from, SessionState& to, const ModelGeometry& g, int64_t cells, int64_t lo,
                          int64_t hi, int64_t first, void* stream);
+/// session_copy_layers through the QSA states' page tables (`from_map` / `to_map` as in qsa_copy_cells_mapped).
+bool session_copy_layers_mapped(const SessionState& from, const int32_t* from_map, SessionState& to,
+                                const int32_t* to_map, const ModelGeometry& g, int64_t cells, int64_t lo, int64_t hi,
+                                int64_t first, void* stream);
 /// After a failed copy of a checkpoint or of K/V cells: waits for the copies queued before it and clears the
 /// runtime's error, which the next launch check would otherwise take for its own and end the engine (the caller
 /// falls back: no checkpoint, no stash, or the prompt read again).  Returns false.

@@ -811,11 +811,16 @@ struct BatchSlot {
     bool made = false;                 // its sessions, windows and drafter exist
     std::atomic<bool> active{false};   // between its BADM 1 and its BDONE
     std::atomic<bool> stop{false};     // BSTOP
-    int64_t cells = 0;
-    void* mem1 = nullptr;              // its sessions' device memory: the main GPU's (layers before the split, PLE)
-    void* mem2 = nullptr;              // and the second GPU's
-    strata::core::SessionState ss1, ss2;
+    int64_t cells = 0;                 // its logical cells (STRATA_SLOT_CELLS)
+    strata::core::SessionState ss1, ss2;   // the main GPU's (layers before the split, PLE) and the second's
     std::vector<strata::core::QsaState> q1, q2;
+    strata::core::QsaState mkv;        // its drafter's K/V
+    // its K/V pages in the slots' shared pool: logical page -> physical page (the same on both GPUs and for the
+    // drafter), the cells they cover, and the runs it holds; the device tables (one a GPU) its states read
+    std::vector<int32_t> map;
+    int64_t mapped = 0;
+    std::vector<std::pair<int64_t, int64_t>> runs;
+    int32_t *table1 = nullptr, *table2 = nullptr;
     strata::core::Verifier A, B;
     strata::core::MtpDrafter m;
     int64_t p = 0, produced = 0, max_new = 0, rounds = 0, offered = 0, accepted = 0;
@@ -4158,7 +4163,7 @@ int main(int argc, char** argv) {
         }
         const int64_t slot_cells = [&] {
             const char* v = std::getenv("STRATA_SLOT_CELLS");
-            const int64_t c = v != nullptr ? std::atoll(v) : 131072;
+            const int64_t c = v != nullptr ? std::atoll(v) : o.max_context;
             return std::min<int64_t>(o.max_context, std::max<int64_t>(c, 4096)) / 256 * 256;
         }();
         static std::mutex pool_lock2;
@@ -4374,23 +4379,137 @@ int main(int argc, char** argv) {
         std::thread s_first, s_second;
         Drive sdA, sdB;                  // each stage's pool user (the solo path keeps `drive`)
         const int dev2 = ver2 != nullptr ? dsplit.device() : -1;
-        // each slot's sessions live in cache slots lent while it runs (SlotLoan): on the main GPU below the elastic
-        // K/V's room for the whole context under the prompt path's loan, on the second below its prompt path's loan;
-        // one region a slot, at fixed places (the windows' graphs bake them in), stacked downwards
-        std::vector<SlotLoan> sl1((size_t) n_slots), sl2((size_t) n_slots);
-        int64_t slot_end1 = -1, slot_end2 = -1;
-        // an ended slot's slots back to the experts (refilled from the arena): before a request, once nothing reads them
-        auto give_back_slots = [&](int except) {
-            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
-            for (int i = 0; i < n_slots; ++i) {
-                if (i == except || slots[(size_t) i]->active.load()) continue;
-                std::string e;
-                if (!sl1[(size_t) i].give_back(*srcp, g.n_expert, e) || !sl2[(size_t) i].give_back(*srcp, g.n_expert, e)) {
-                    std::fprintf(stderr, "strata serve: giving a batch slot's VRAM back: %s\n", e.c_str());
-                    return false;
-                }
+        // The slots' sessions live in a region of each GPU's expert cache (on the main GPU below the elastic K/V's room
+        // for the whole context under the prompt path's loan, on the second below its prompt path's loan), laid out once
+        // (the windows' graphs bake the addresses in) and lent as far as it is used.  Their K/V is paged: one pool of
+        // physical pages a QSA layer (and one for the drafters), shared by every slot, each slot's page table mapping its
+        // logical cells onto the pages it holds (STRATA_SLOT_POOL_CELLS the pool's cells; STRATA_SLOT_CELLS a slot's
+        // logical ones).  Pages are taken from the pool's top down, so the pages in use are the end of every pool array:
+        // each array has a loan of its own that grows down with them.  A slot's own parts (its GDN states, indexers and
+        // page tables, the PLE's history) are one loan, taken when it is first admitted.  All of it goes back when no
+        // slot runs and a solo request comes (refilled from the arena).
+        struct ArrLoan {
+            SlotLoan loan;
+            uint64_t end_off = 0;    // the array's end, as an offset in its cache
+            uint64_t page_bytes = 0;
+            int64_t lent_pages = 0;  // the array's last pages lent so far
+        };
+        std::vector<ArrLoan> al1, al2;           // the pool arrays' loans on each GPU
+        std::vector<SlotLoan> fl1((size_t) n_slots), fl2((size_t) n_slots);   // each slot's own parts
+        std::vector<std::pair<uint8_t*, uint64_t>> own1((size_t) n_slots), own2((size_t) n_slots);   // and their bytes
+        bool region_made = false;
+        const int64_t page_cells = strata::core::qsa_shapes(g).page_size;
+        const int64_t pool_pages = [&] {
+            const char* v = std::getenv("STRATA_SLOT_POOL_CELLS");
+            const int64_t c = v != nullptr ? std::atoll(v) : o.max_context;
+            return std::max<int64_t>(c, 8192) / page_cells;
+        }();
+        std::vector<uint8_t> page_used((size_t) pool_pages, 0);
+        int64_t page_low = pool_pages;   // the lowest page lent on every array (pages [page_low, pool_pages))
+        std::mutex pg_mu;   // the page allocator (an admission on this thread, a slot's growth on the first slot thread)
+        // a run of `n` free pages, as high as it goes: just below `below` when that run is free (a slot grows on down)
+        auto take_pages = [&](int64_t n, int64_t below) -> int64_t {
+            auto free_at = [&](int64_t a0) {
+                if (a0 < 0 || a0 + n > pool_pages) return false;
+                for (int64_t k = 0; k < n; ++k) if (page_used[(size_t) (a0 + k)]) return false;
+                return true;
+            };
+            int64_t a0 = below >= 0 && free_at(below - n) ? below - n : -1;
+            for (int64_t top = pool_pages; a0 < 0 && top - n >= 0;) {
+                int64_t k = 0;
+                while (k < n && !page_used[(size_t) (top - 1 - k)]) ++k;
+                if (k == n) a0 = top - n;
+                else top -= k + 1;
             }
+            if (a0 >= 0) std::fill(page_used.begin() + a0, page_used.begin() + a0 + n, (uint8_t) 1);
+            return a0;
+        };
+        auto drop_pages = [&](BatchSlot& b) {   // (pg_mu held)
+            for (const auto& [a0, n] : b.runs) std::fill(page_used.begin() + a0, page_used.begin() + a0 + n, (uint8_t) 0);
+            b.runs.clear();
+            b.mapped = 0;
+            b.held.clear();   // what its pages held is gone
+        };
+        auto free_pages = [&]() {   // (pg_mu held)
+            int64_t n = 0;
+            for (uint8_t u : page_used) n += !u;
+            return n;
+        };
+        // the pool arrays lent down to page `low` (under the residency lock: between windows)
+        auto lend_pool = [&](int64_t low) -> bool {
+            if (low >= page_low) return true;
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
+            for (std::vector<ArrLoan>* al : {&al1, &al2})
+                for (ArrLoan& x : *al) {
+                    const int64_t want = pool_pages - low;
+                    if (want <= x.lent_pages) continue;
+                    // the bytes from the array's last lent page down, and what its loan's last slot reaches past its end
+                    const uint64_t over = x.loan.offset(x.loan.top()) - x.end_off;
+                    if (!x.loan.plan((uint64_t) want * x.page_bytes + over)) return false;
+                    x.loan.lend();
+                    x.lent_pages = want;
+                }
+            page_low = low;
             return true;
+        };
+        // a slot's pages for `cells` cells: its map, the pool lent that far, its device tables (between its windows)
+        auto map_pages = [&](BatchSlot& b, int64_t cells) -> bool {
+            int64_t have = 0, want = 0, a0 = -1, n = 0, low = 0;
+            {
+                std::lock_guard<std::mutex> lk(pg_mu);
+                want = (std::min<int64_t>(cells, b.cells) + page_cells - 1) / page_cells;
+                have = b.mapped / page_cells;
+                if (want <= have) return true;
+                n = want - have;
+                const int64_t below = b.runs.empty() ? -1 : b.runs.back().first;
+                a0 = take_pages(n, below);
+                for (auto& o2 : slots)   // an ended slot's pages, when the pool has none left
+                    if (a0 < 0 && o2.get() != &b && !o2->active.load() && !o2->runs.empty()) {
+                        drop_pages(*o2);
+                        a0 = take_pages(n, below);
+                    }
+                if (a0 < 0) return false;
+                if (!b.runs.empty() && b.runs.back().first == a0 + n) {   // its last run grows down
+                    b.runs.back().first = a0;
+                    b.runs.back().second += n;
+                } else {
+                    b.runs.emplace_back(a0, n);
+                }
+                for (int64_t k = 0; k < n; ++k) b.map[(size_t) (have + k)] = (int32_t) (a0 + k);
+                low = pool_pages;
+                for (int64_t i = 0; i < pool_pages; ++i) if (page_used[(size_t) i]) { low = i; break; }
+            }
+            if (!lend_pool(low)) return false;
+            const size_t off = (size_t) have * 4, bytes = (size_t) n * 4;
+            bool ok = cudaMemcpy((uint8_t*) b.table1 + off, b.map.data() + have, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+            cudaSetDevice(dev2);
+            ok = ok && cudaMemcpy((uint8_t*) b.table2 + off, b.map.data() + have, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+            cudaSetDevice(o.main_gpu);
+            b.mapped = want * page_cells;
+            return ok;
+        };
+        // all of the slots' VRAM back to the experts (refilled from the arena) once no slot runs: their pages go too
+        auto give_back_slots = [&](int) {
+            for (auto& b : slots) if (b->active.load()) return true;
+            if (page_low >= pool_pages && std::all_of(fl1.begin(), fl1.end(), [](const SlotLoan& l) { return l.lent.empty(); }))
+                return true;
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
+            {
+                std::lock_guard<std::mutex> lk(pg_mu);
+                for (auto& b : slots) drop_pages(*b);
+            }
+            std::string e;
+            bool ok = true;
+            for (std::vector<ArrLoan>* al : {&al1, &al2})
+                for (ArrLoan& x : *al) {
+                    ok = ok && x.loan.give_back(*srcp, g.n_expert, e);
+                    x.lent_pages = 0;
+                }
+            for (std::vector<SlotLoan>* fl : {&fl1, &fl2})
+                for (SlotLoan& l : *fl) ok = ok && l.give_back(*srcp, g.n_expert, e);
+            page_low = pool_pages;
+            if (!ok) std::fprintf(stderr, "strata serve: giving the batch slots' VRAM back: %s\n", e.c_str());
+            return ok;
         };
         auto slot_fail = [&](const std::string& e) {
             std::lock_guard<std::mutex> lk(smu);
@@ -4439,6 +4558,16 @@ int main(int argc, char** argv) {
             if (!b.m.draft(b.T, b.outv.data(), b.p - (a + 1), a, b.drafts.data(), e, b.dprob.data(), (float) b.spec_min_p)) {
                 slot_fail(e);
                 return false;
+            }
+            // the next window's cells: more pages before it, 4096 cells at a time, while the pool has them
+            if (b.p + o.max_window() + 64 > b.mapped && !map_pages(b, b.p + o.max_window() + 4096)) {
+                b.held.assign(b.toks.begin(), b.toks.begin() + (ptrdiff_t) std::min<int64_t>(b.p, (int64_t) b.toks.size()));
+                std::printf("BDONE %d %lld length %.1f\n", b.id, (long long) b.produced,
+                            std::chrono::duration<double, std::milli>(Clock::now() - b.t0).count());
+                std::fflush(stdout);
+                std::fprintf(stderr, "strata serve: slot %d: the batch slots' K/V pool is full at %lld cells\n", b.id,
+                             (long long) b.p);
+                b.active.store(false);
             }
             return true;
         };
@@ -4571,76 +4700,188 @@ int main(int argc, char** argv) {
             scv.notify_all();
         };
         // a slot's sessions, windows and drafter, once (their addresses stay: the windows' graphs bake them in)
-        // the slot's loans taken and its sessions laid out in them (zeroed: what the experts left there is not state)
-        auto lend_slot = [&](BatchSlot& b, std::string& e) -> bool {
+        const int64_t L = ver2 != nullptr ? dsplit.at() : 0;
+        std::vector<strata::core::QsaState> tpl1, tpl2;   // the pools' template states (their arrays; no slot's)
+        strata::core::QsaState tpl_m;
+        // the slots' region laid out on its first use: the pool arrays, then each slot's own parts, every array and every
+        // slot's parts with its loan (none lent yet)
+        auto make_region = [&](std::string& e) -> bool {
+            if (region_made) return true;
             std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
-            const int64_t L = dsplit.at();
-            SlotLoan &l1 = sl1[(size_t) b.id], &l2 = sl2[(size_t) b.id];
-            if (l1.lent.empty()) l1.lend();
-            if (l2.lent.empty()) l2.lend();
-            const bool ok1 = strata::core::make_range_session(g, b.cells, 0, L, K, b.mem1, b.ss1, b.q1);
+            const auto kv = strata::core::qsa_kv_format(), dkv = strata::core::qsa_draft_kv_format();
+            auto up = [](uint64_t x) { return (x + 4095) & ~4095ull; };
+            auto qsa_in = [&](int64_t lo, int64_t hi) {
+                int64_t n = 0;
+                for (int64_t l = lo; l < hi; ++l) n += strata::core::is_qsa_layer(g, l);
+                return n;
+            };
+            auto gdn_in = [&](int64_t lo, int64_t hi) { return (hi - lo) - qsa_in(lo, hi); };
+            // bytes: a GPU's pools, and one slot's own parts
+            auto pool_bytes = [&](int64_t lo, int64_t hi, bool main_gpu) {
+                uint64_t n = (uint64_t) qsa_in(lo, hi) * up(strata::core::qsa_state_paged_bytes(g, page_cells, pool_pages, true, false, kv));
+                if (main_gpu) n += up(strata::core::qsa_state_paged_bytes(g, page_cells, pool_pages, true, false, dkv));
+                return n;
+            };
+            auto own_bytes = [&](int64_t lo, int64_t hi, bool main_gpu) {
+                uint64_t n = up((uint64_t) gdn_in(lo, hi) * strata::core::gdn_state_floats(g) * 4) +
+                             (uint64_t) qsa_in(lo, hi) * up(strata::core::qsa_state_paged_bytes(g, slot_cells, pool_pages, false, true, kv));
+                if (main_gpu)
+                    n += up(strata::core::ple_hist_bytes()) +
+                         up(strata::core::qsa_state_paged_bytes(g, slot_cells, pool_pages, false, false, dkv));
+                return n;
+            };
+            // the bounds below which the region goes
+            const bool off = o.second_gpu >= 0 && !o.no_prompt_offload;
+            SlotLoan top1;
+            top1.cache = &xcache;
+            top1.plan(worst_loan(off));
+            int64_t end1 = top1.first >= 0 ? top1.first : xcache.slots();
+            if (kvg.on) {   // the whole context's K/V under the loan
+                const uint64_t G = strata::core::vmm_granularity();
+                const uint64_t kvb = (uint64_t) strata::core::qsa_kv_elastic_need(o.max_context + 64) * G + G;
+                end1 = std::min<int64_t>(end1, kvg.top);
+                const uint64_t t = top1.offset(end1);
+                while (end1 > (int64_t) pin1.size() && t - top1.offset(end1) < kvb) --end1;
+            }
+            using strata::prefill::ExpertRunner;
+            const uint64_t need2 = ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) +
+                                   ExpertRunner::area_cap(o.prefill_chunk, true) +
+                                   psplit.bytes_for(o.prefill_chunk, o.max_context) + (256ull << 20);
+            SlotLoan top2;
+            top2.cache = &gpu2.cache();
+            top2.plan(need2);
+            const int64_t end2 = top2.first >= 0 ? top2.first : gpu2.cache().slots();
+            // a GPU's region: its start, and the loans of its arrays and slots
+            auto lay = [&](strata::core::ExpertCache& cache, std::vector<int32_t>& res, int32_t* dres, int dev, int64_t keep,
+                           int64_t end, int64_t lo, int64_t hi, bool main_gpu, std::vector<ArrLoan>& al,
+                           std::vector<SlotLoan>& fl, std::vector<std::pair<uint8_t*, uint64_t>>& own,
+                           std::vector<strata::core::QsaState>& tpl) -> bool {
+                SlotLoan whole;
+                whole.cache = &cache;
+                whole.keep = keep;
+                whole.end = end;
+                const uint64_t pb = pool_bytes(lo, hi, main_gpu), ob = own_bytes(lo, hi, main_gpu);
+                if (!whole.plan(pb + (uint64_t) n_slots * ob + (4ull << 20))) {
+                    e = "the expert cache on GPU " + std::to_string(dev) + " cannot hold the batch slots' region (" +
+                        std::to_string((pb + n_slots * ob) >> 20) + " MiB: lower STRATA_SLOT_POOL_CELLS, STRATA_SLOT_CELLS or --batch)";
+                    return false;
+                }
+                uint8_t* const base = (uint8_t*) whole.base();
+                const uint64_t base_off = whole.offset(whole.first);
+                uint8_t* q = base;
+                auto loan_for = [&](uint64_t a_off, uint64_t b_off) {   // a loan whose last slot holds offset b_off - 1
+                    SlotLoan l;
+                    l.cache = &cache;
+                    l.res = &res;
+                    l.d_res = dres;
+                    l.device = dev;
+                    l.main_device = o.main_gpu;
+                    l.keep = keep;
+                    int64_t s0 = whole.first;
+                    while (s0 < end && l.offset(s0 + 1) <= b_off - 1) ++s0;
+                    l.end = s0 + 1;
+                    (void) a_off;
+                    return l;
+                };
+                // the pools: a template state a layer carves them
+                const int64_t nq = qsa_in(lo, hi);
+                tpl.assign((size_t) nq, strata::core::QsaState{});
+                auto arrays = [&](const strata::core::QsaState& t) {
+                    const strata::kernels::QsaShapes sh = strata::core::qsa_shapes(g);
+                    for (const auto& a : strata::core::qsa_kv_arrays(t, g)) {
+                        ArrLoan x;
+                        x.page_bytes = (uint64_t) sh.n_head_kv * (uint64_t) sh.page_size * a.row_bytes;
+                        const uint64_t a_off = base_off + (uint64_t) ((uint8_t*) a.data - base);
+                        x.end_off = a_off + (uint64_t) pool_pages * x.page_bytes;
+                        x.loan = loan_for(a_off, x.end_off);
+                        al.push_back(x);
+                    }
+                };
+                for (int64_t k = 0; k < nq; ++k) {
+                    q += up(strata::core::qsa_state_paged_init(g, page_cells, pool_pages, false, kv, q, tpl[(size_t) k], nullptr, nullptr, false));
+                    arrays(tpl[(size_t) k]);
+                }
+                if (main_gpu) {
+                    q += up(strata::core::qsa_state_paged_init(g, page_cells, pool_pages, false, dkv, q, tpl_m, nullptr, nullptr, false));
+                    arrays(tpl_m);
+                }
+                // each slot's own parts
+                for (int i = 0; i < n_slots; ++i) {
+                    BatchSlot& b = *slots[(size_t) i];
+                    uint8_t* const q0 = q;
+                    strata::core::SessionState& st = main_gpu ? b.ss1 : b.ss2;
+                    std::vector<strata::core::QsaState>& qs = main_gpu ? b.q1 : b.q2;
+                    st = strata::core::SessionState{};
+                    const int64_t ng = gdn_in(lo, hi);
+                    st.gdn_state = (float*) q;
+                    q += up((uint64_t) ng * strata::core::gdn_state_floats(g) * 4);
+                    qs.assign((size_t) nq, strata::core::QsaState{});
+                    for (int64_t k = 0; k < nq; ++k) {
+                        q += up(strata::core::qsa_state_paged_init(g, slot_cells, pool_pages, true, kv, q, qs[(size_t) k],
+                                                                    &tpl[(size_t) k], nullptr, false));
+                        qs[(size_t) k].page_table = qs[0].page_table;   // one table a slot and GPU
+                    }
+                    (main_gpu ? b.table1 : b.table2) = nq > 0 ? qs[0].page_table : nullptr;
+                    if (main_gpu) {
+                        st.ple_hist = (float*) q;
+                        q += up(strata::core::ple_hist_bytes());
+                        q += up(strata::core::qsa_state_paged_init(g, slot_cells, pool_pages, false, dkv, q, b.mkv, &tpl_m, nullptr, false));
+                        b.mkv.page_table = b.table1;
+                    }
+                    st.qsa_states = qs.data();
+                    st.k = K;
+                    st.max_cells = slot_cells;
+                    b.cells = slot_cells;
+                    b.map.assign((size_t) ((slot_cells + page_cells - 1) / page_cells), 0);
+                    const uint64_t a_off = base_off + (uint64_t) (q0 - base), b_off = base_off + (uint64_t) (q - base);
+                    SlotLoan l = loan_for(a_off, b_off);
+                    if (!l.plan(b_off - a_off + (l.offset(l.top()) - b_off))) {
+                        e = "a batch slot's own parts";
+                        return false;
+                    }
+                    fl[(size_t) i] = l;
+                    own[(size_t) i] = {q0, (uint64_t) (q - q0)};
+                }
+                std::fprintf(stderr, "strata serve: batch slots on GPU %d: a region of %.0f MiB from slot %d (pools %.0f, each "
+                                     "slot's own %.0f), lent as far as used\n", dev, (double) (q - base) / 1048576.0,
+                             whole.first, (double) pb / 1048576.0, (double) ob / 1048576.0);
+                return true;
+            };
+            // nothing in it is touched until its loans are lent (the experts there are live until then)
+            bool ok = lay(xcache, host_res, d_res, o.main_gpu, (int64_t) pin1.size(), end1, 0, L, true, al1, fl1, own1, tpl1);
             cudaSetDevice(dev2);
-            const bool ok2 = strata::core::make_range_session(g, b.cells, L, g.n_layers, K, b.mem2, b.ss2, b.q2);
+            ok = ok && lay(gpu2.cache(), host_res2, nullptr, dev2, (int64_t) pin2.size(), end2, L, g.n_layers, false, al2, fl2, own2, tpl2);
             cudaSetDevice(o.main_gpu);
-            if (!ok1 || !ok2) { e = "batch slot " + std::to_string(b.id) + ": its sessions"; return false; }
+            if (!ok) return false;
+            region_made = true;
+            return true;
+        };
+        // a slot's own parts lent (its states zeroed and its page tables cleared: what the experts left there is not
+        // state), once a give-back has taken them
+        auto lend_own = [&](BatchSlot& b) -> bool {
+            SlotLoan &l1 = fl1[(size_t) b.id], &l2 = fl2[(size_t) b.id];
+            if (!l1.lent.empty() || !l2.lent.empty()) return true;
+            std::unique_lock<std::shared_mutex> res_lk(g_res_mx);
+            l1.lend();
+            l2.lend();
+            const auto [p1, n1] = own1[(size_t) b.id];
+            const auto [p2, n2] = own2[(size_t) b.id];
+            const bool ok1 = cudaMemset(p1, 0, (size_t) n1) == cudaSuccess;   // its own bytes only (a loan's edge
+            cudaSetDevice(dev2);                                              // slots reach into its neighbours')
+            const bool ok2 = cudaMemset(p2, 0, (size_t) n2) == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+            cudaSetDevice(o.main_gpu);
+            return ok1 && ok2 && cudaDeviceSynchronize() == cudaSuccess;
+        };
+        // a slot's windows and drafter, once
+        auto make_slot = [&](BatchSlot& b, std::string& e) -> bool {
+            if (!make_region(e)) return false;
+            if (!lend_own(b)) { e = "lending batch slot " + std::to_string(b.id) + "'s own parts"; return false; }
             b.ss1.ple = ss.ple;
             if (ple_table2.is_open()) b.ss1.ple.table = &ple_table2;   // the main thread's prompts read the other
             b.ss1.ple.token = &b.ss1.ple_token;
             b.ss1.ple.prev = b.ss1.ple_prev;
             b.ss1.ple.hist = b.ss1.ple_hist;
-            return true;
-        };
-        auto make_slot = [&](BatchSlot& b, std::string& e) -> bool {
-            if (b.made) return lend_slot(b, e);
-            const int64_t L = dsplit.at();
-            b.cells = slot_cells;
-            const uint64_t b1 = strata::core::range_session_bytes(g, b.cells, 0, L);
-            const uint64_t b2 = strata::core::range_session_bytes(g, b.cells, L, g.n_layers);
-            if (slot_end1 < 0) {   // the regions' upper bounds, once
-                const bool off = o.second_gpu >= 0 && !o.no_prompt_offload;
-                SlotLoan top1;
-                top1.cache = &xcache;
-                top1.plan(worst_loan(off));
-                slot_end1 = top1.first >= 0 ? top1.first : xcache.slots();
-                if (kvg.on) {   // the whole context's K/V under the loan
-                    const uint64_t G = strata::core::vmm_granularity();
-                    const uint64_t kv = (uint64_t) strata::core::qsa_kv_elastic_need(o.max_context + 64) * G + G;
-                    slot_end1 = std::min<int64_t>(slot_end1, kvg.top);
-                    const uint64_t t = top1.offset(slot_end1);
-                    while (slot_end1 > (int64_t) pin1.size() && t - top1.offset(slot_end1) < kv) --slot_end1;
-                }
-                using strata::prefill::ExpertRunner;
-                const uint64_t need2 = ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) +
-                                       ExpertRunner::area_cap(o.prefill_chunk, true) +
-                                       psplit.bytes_for(o.prefill_chunk, o.max_context) + (256ull << 20);
-                SlotLoan top2;
-                top2.cache = &gpu2.cache();
-                top2.plan(need2);
-                slot_end2 = top2.first >= 0 ? top2.first : gpu2.cache().slots();
-            }
-            SlotLoan &l1 = sl1[(size_t) b.id], &l2 = sl2[(size_t) b.id];
-            l1.cache = &xcache;
-            l1.res = &host_res;
-            l1.d_res = d_res;
-            l1.device = l1.main_device = o.main_gpu;
-            l1.keep = (int64_t) pin1.size();
-            l1.end = slot_end1;
-            l2.cache = &gpu2.cache();
-            l2.res = &host_res2;
-            l2.device = dev2;
-            l2.main_device = o.main_gpu;
-            l2.keep = (int64_t) pin2.size();
-            l2.end = slot_end2;
-            if (!l1.plan(b1) || !l2.plan(b2)) {
-                e = "batch slot " + std::to_string(b.id) + ": the expert caches cannot lend its sessions' " +
-                    std::to_string((b1 + b2) >> 20) + " MiB (lower STRATA_SLOT_CELLS)";
-                return false;
-            }
-            slot_end1 = l1.first;   // the next slot's region goes below this one's
-            slot_end2 = l2.first;
-            b.mem1 = l1.base();
-            b.mem2 = l2.base();
-            if (!lend_slot(b, e)) return false;
+            if (b.made) return true;
             b.A.set_layers(0, L);
             b.A.set_host_rows(true);
             if (!b.A.init(wt, g, b.ss1, vh, &native_head, W, e)) return false;
@@ -4659,12 +4900,8 @@ int main(int argc, char** argv) {
             const bool okb = b.B.init(dsplit.weights(), g, b.ss2, vh2, &dsplit.head(), W, e);
             cudaSetDevice(o.main_gpu);
             if (!okb) return false;
-            // the drafter's K/V of the slot's length, never elastic (the main session's growth is not its own)
-            const bool elastic = strata::core::qsa_kv_elastic();
-            strata::core::qsa_set_kv_elastic(false, 0);
-            const bool okm = b.m.load_shared(mtp, b.ss1, W, e) && b.m.bind(wt, &native_head, b.A.final_R_all(), e);
-            strata::core::qsa_set_kv_elastic(elastic, 0);
-            if (!okm) return false;
+            if (!b.m.load_shared(mtp, b.ss1, W, e, &b.mkv) || !b.m.bind(wt, &native_head, b.A.final_R_all(), e))
+                return false;
             b.window.assign((size_t) W, 0);
             b.outv.assign((size_t) W, 0);
             b.drafts.assign((size_t) W, 0);
@@ -4675,10 +4912,8 @@ int main(int argc, char** argv) {
             cudaSetDevice(dev2);
             cudaMemGetInfo(&f2, &t2);
             cudaSetDevice(o.main_gpu);
-            std::fprintf(stderr, "strata serve: batch slot %d made: %lld cells, its sessions in %lld + %lld lent cache slots "
-                                 "(%.0f MiB, from slot %d / %d); %lld / %lld MiB left free\n", b.id, (long long) b.cells,
-                         (long long) l1.slots(), (long long) l2.slots(), (double) (b1 + b2) / 1048576.0, l1.first,
-                         l2.first, (long long) (f1 >> 20), (long long) (f2 >> 20));
+            std::fprintf(stderr, "strata serve: batch slot %d made; %lld / %lld MiB left free\n", b.id,
+                         (long long) (f1 >> 20), (long long) (f2 >> 20));
             return true;
         };
         while ((resume_slots(), next_line(line))) {
@@ -4798,11 +5033,21 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
-            if (admit >= 0 && n + 8192 > slot_cells) {   // its sessions would not hold it (STRATA_SLOT_CELLS)
-                std::printf("ERR BGEN: a conversation of %lld tokens is longer than a batch slot holds (%lld with 8192 to "
-                            "generate)\n", (long long) n, (long long) slot_cells);
-                std::fflush(stdout);
-                continue;
+            if (admit >= 0) {   // a slot's logical cells, and the shared pool's pages (free, or an ended slot's), hold it
+                int64_t room = 0;
+                {
+                    std::lock_guard<std::mutex> lk(pg_mu);
+                    room = free_pages();
+                    for (auto& b : slots)
+                        if (!b->active.load()) for (const auto& r : b->runs) room += r.second;
+                }
+                const int64_t need = (n + 4096 + page_cells - 1) / page_cells;
+                if (n + 8192 > slot_cells || need > room) {
+                    std::printf("ERR BGEN: no room for a conversation of %lld tokens (a slot holds %lld; the K/V pool has "
+                                "%lld cells free)\n", (long long) n, (long long) slot_cells, (long long) (room * page_cells));
+                    std::fflush(stdout);
+                    continue;
+                }
             }
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
@@ -4957,14 +5202,17 @@ int main(int argc, char** argv) {
                         (from == nullptr || b->held.size() > from->held.size()))
                         from = b.get();
                 if (from != nullptr) {
-                    const int64_t cells = (int64_t) from->held.size(), L = dsplit.at();
+                    const int64_t cells = (int64_t) from->held.size();
                     bool ok = !kvg.on || kvg_ensure(cells + 256);
-                    ok = ok && strata::core::session_copy_layers(from->ss1, ss, g, cells, 0, L, 0, main_cs) &&
-                         strata::core::qsa_copy_cells(from->m.kv_state(), mtp.kv_state(), g, cells, main_cs) &&
+                    ok = ok && strata::core::session_copy_layers_mapped(from->ss1, from->map.data(), ss, nullptr, g, cells, 0,
+                                                                         L, 0, main_cs) &&
+                         strata::core::qsa_copy_cells_mapped(from->m.kv_state(), from->map.data(), mtp.kv_state(), nullptr,
+                                                             g, cells, main_cs) &&
                          cudaStreamSynchronize(main_stream) == cudaSuccess;
                     cudaSetDevice(dev2);
-                    ok = ok && strata::core::session_copy_layers(from->ss2, dsplit.session(), g, cells, L, g.n_layers, L,
-                                                                  nullptr);
+                    ok = ok && strata::core::session_copy_layers_mapped(from->ss2, from->map.data(), dsplit.session(), nullptr,
+                                                                         g, cells, L, g.n_layers, L, nullptr) &&
+                         cudaDeviceSynchronize() == cudaSuccess;
                     cudaSetDevice(o.main_gpu);
                     if (!ok) { report("copying a batch slot's sessions back"); return 1; }
                     pcache.forget();
@@ -5391,18 +5639,39 @@ int main(int argc, char** argv) {
                 std::string e;
                 if (cont && !make_slot(b, e)) { report(e); return 1; }
                 if (cont) {
-                    const int64_t L = dsplit.at();
-                    bool ok = strata::core::session_copy_layers(ss, b.ss1, g, p, 0, L, 0, main_cs) &&
-                              strata::core::qsa_copy_cells(mtp.kv_state(), b.m.kv_state(), g, p, main_cs) &&
-                              cudaMemcpyAsync((void*) b.A.final_R_all(), ver.final_R_all(),
-                                              (size_t) last_T * (size_t) (g.hc * g.n_embd) * sizeof(float),
-                                              cudaMemcpyDeviceToDevice, main_stream) == cudaSuccess &&
-                              cudaStreamSynchronize(main_stream) == cudaSuccess;
+                    {   // its pages: its last conversation's go, the prompt's and 4096 cells more come
+                        std::lock_guard<std::mutex> lk(pg_mu);
+                        drop_pages(b);
+                    }
+                    if (!map_pages(b, p + 4096)) {
+                        report("batch slot " + std::to_string(admit) + ": the K/V pool has no room for " +
+                               std::to_string(p) + " cells");
+                        return 1;
+                    }
+                    const char* step = nullptr;
+                    if (!strata::core::session_copy_layers_mapped(ss, nullptr, b.ss1, b.map.data(), g, p, 0, L, 0, main_cs))
+                        step = "the main GPU's layers";
+                    else if (!strata::core::qsa_copy_cells_mapped(mtp.kv_state(), nullptr, b.m.kv_state(), b.map.data(), g,
+                                                                  p, main_cs))
+                        step = "the drafter's cells";
+                    else if (cudaMemcpyAsync((void*) b.A.final_R_all(), ver.final_R_all(),
+                                             (size_t) last_T * (size_t) (g.hc * g.n_embd) * sizeof(float),
+                                             cudaMemcpyDeviceToDevice, main_stream) != cudaSuccess ||
+                             cudaStreamSynchronize(main_stream) != cudaSuccess)
+                        step = "the last window's rows";
                     cudaSetDevice(dev2);
-                    ok = ok && strata::core::session_copy_layers(dsplit.session(), b.ss2, g, p, L, g.n_layers, L, nullptr);
+                    if (step == nullptr &&
+                        (!strata::core::session_copy_layers_mapped(dsplit.session(), nullptr, b.ss2, b.map.data(), g, p, L,
+                                                                    g.n_layers, L, nullptr) ||
+                         cudaDeviceSynchronize() != cudaSuccess))
+                        step = "the second GPU's layers";
                     b.B.set_sampling(req_sp);   // (penalties stay on the solo path)
                     cudaSetDevice(o.main_gpu);
-                    if (!ok) { report("copying the admission's state into batch slot " + std::to_string(admit)); return 1; }
+                    if (step != nullptr) {
+                        report("copying the admission's state into batch slot " + std::to_string(admit) + ": " + step +
+                               " (" + std::to_string(p) + " cells; " + cudaGetErrorString(cudaGetLastError()) + ")");
+                        return 1;
+                    }
                     b.p = p;
                     b.x = x;
                     b.max_new = admit_max - 1;
