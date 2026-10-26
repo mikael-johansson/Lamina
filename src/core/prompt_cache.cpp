@@ -222,7 +222,11 @@ bool PromptCache::restore(Seq& seq, int64_t pos, bool prefix) {
     if (seq.kv && ensure_kv && !ensure_kv(cells)) return false;
     if (seq.kv && !kv_copy(cells, seq.kv_cells, seq.kv.get(), false)) return false;
     ck->stamp = ++clock_;
-    return session_ckpt_load(ss_, g_, pos, ck->host, stream_) &&
+    // the layers this session holds, as checkpoint() saved them: with a second session (the decode split) only the
+    // ones before it, the main GPU's copies of the others having been freed or lent (batch slots)
+    const int64_t here = second_from > 0 ? second_from : g_.n_layers;
+    return (here < g_.n_layers ? session_ckpt_load_layers(ss_, g_, pos, ck->host, stream_, 0, here, 0)
+                               : session_ckpt_load(ss_, g_, pos, ck->host, stream_)) &&
            (second_from <= 0 || !second_load || second_load(pos, ck->host));
 }
 

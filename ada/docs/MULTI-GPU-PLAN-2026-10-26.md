@@ -162,3 +162,13 @@ admissions read beside decoding slots. Config: `ada/configs/fork-iq3_s-split-bat
 Bit-exact against the unsplit engine (`STRATA_DSPLIT_NOHIT=1`, equal tiers). Limits: a slot holds 128K tokens
 (`STRATA_SLOT_CELLS`, 1.5 GB lent per slot); penalties and images on the solo path; the adaptive tier off in split
 mode; prompts are read one at a time. Next: slot state that grows with its conversation.
+
+### Fix: prompt-cache restore with batch slots (later on 2026-10-26)
+
+With `--decode-split` and `--batch`, every request that went on from a cached prefix crashed the engine (SIGSEGV,
+the server restarted it and answered 503): `PromptCache::restore` loaded all 48 layers of a checkpoint into the main
+session, while a checkpoint holds the main GPU's layers only up to the split (the second GPU saves its own).  The
+main session's QSA pools of the later layers are frozen, and with batch slots unmapped and lent, so the copy went to
+an unmapped address (the driver takes it for host memory).  Restore now loads the layers `checkpoint()` saved.
+Without `--batch` it only copied unused state.  The `pf-split-batch` prefill run had three of these crashes
+(opencode-30k, cc-40k, cc-80k-next): its numbers for those requests are a restart's, not the split's.
