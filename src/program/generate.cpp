@@ -860,8 +860,31 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const fl
         if (gap < 20.0) t->gap_ms = t->gap_ms > 0 ? 0.8 * t->gap_ms + 0.2 * gap : gap;
     }
     if (g_pool_lock != nullptr) {
+        const Clock::time_point w = Clock::now();
         std::lock_guard<std::mutex> lk(*g_pool_lock);
+        const Clock::time_point h = Clock::now();
         strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
+        // STRATA_POOL_BUSY=1: the shared pool's use, every 10 s: how much of the time it computes, how long a stage
+        // waited for it
+        static const bool busy = std::getenv("STRATA_POOL_BUSY") != nullptr;
+        if (busy) {
+            static double held = 0, waited = 0;
+            static int64_t calls = 0;
+            static Clock::time_point since = Clock::now();
+            const Clock::time_point e = Clock::now();
+            held += std::chrono::duration<double, std::milli>(e - h).count();
+            waited += std::chrono::duration<double, std::milli>(h - w).count();
+            ++calls;
+            const double span = std::chrono::duration<double, std::milli>(e - since).count();
+            if (span > 10000.0) {
+                std::fprintf(stderr, "strata serve: the CPU pool computed %.0f%% of the last %.0f s; %lld layers waited "
+                                     "%.1f us each for it\n", 100.0 * held / span, span / 1000.0, (long long) calls,
+                             1000.0 * waited / (double) std::max<int64_t>(calls, 1));
+                held = waited = 0;
+                calls = 0;
+                since = e;
+            }
+        }
     } else {
         strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
     }
