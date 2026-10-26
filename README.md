@@ -8,6 +8,8 @@ This is the `custom` branch of the eddoursul fork plus our work for the ada box 
   analysis, batching and TP=2 designs.
 - [Multi-GPU findings and plan, 2026-10-26](ada/docs/MULTI-GPU-PLAN-2026-10-26.md): TP verdict, upstream's
   layer split measured, the plan for a decode layer split and two requests in flight.
+- **[PBO step by step (BIOS), 2026-10-26](ada/docs/PBO-GUIDE-2026-10-26.md)**: raising the CPU's 76 W power limit
+  (the CPU expert pool is power-bound), how to check it took, stability tests, going back.
 - [GPU kernel profile and experiments, 2026-10-26](ada/docs/KERNEL-PROFILE-2026-10-26.md): where a decode window
   goes per kernel, what the 3090 is limited by, the experiments, prefill and gpu-unlock.
 - [Running plan and notes](ada/docs/PLAN.md) · [First 2x3090 analysis, 2026-10-23](ada/docs/strata-2x3090-96gb-analysis-2026-10-23.md)

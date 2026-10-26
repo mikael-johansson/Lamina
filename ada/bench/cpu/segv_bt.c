@@ -1,4 +1,4 @@
-// LD_PRELOAD=bench/libsegv_bt.so: on SIGSEGV/SIGBUS/SIGABRT, the faulting thread's backtrace to stderr (and to
+// LD_PRELOAD=.../libsegv_bt.so (gcc -O1 -shared -fPIC segv_bt.c -o libsegv_bt.so): on SIGSEGV/SIGBUS/SIGABRT, the faulting thread's backtrace to stderr (and to
 // $SEGV_BT_OUT when set), then the default action.  For a crash in a process a server starts.
 #define _GNU_SOURCE
 #include <execinfo.h>

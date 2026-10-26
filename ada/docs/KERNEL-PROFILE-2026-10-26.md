@@ -100,3 +100,31 @@ On this card the small kernels' cost is mostly their own arithmetic and reductio
 gaps between them: fusing the HC read did not pay (above).  Without programmatic dependent launch (Hopper on) there
 is no cheap way to start a kernel's reads before its predecessor ends.  The cheap remaining levers are settings:
 VRAM overclock (the big streams are at the bandwidth limit), gpu-unlock for prefill, CPU PBO, `--spec 5`.
+
+## The CPU expert pool: limited by the package power (later the same day)
+
+`kbench` (`ada/bench/kbench.cpp`), gate/up with the weights in L3 (no RAM in the way):
+
+| | 1 thread | 7 threads |
+| --- | --- | --- |
+| core clock (median) | 4650 MHz | 4025 MHz (-13.5%) |
+| GB/s of weights a thread | ~4.4 | ~4.0 (-10%) |
+
+7 threads reach ~27-28 GB/s; the engine's pool phases stream 27.3 GB/s; the fast (dual-channel) places in which
+`--arena-place` keeps every CPU-computed expert time ~35 GB/s on 8 cores.  So gate/up is compute-bound, below the RAM
+it reads (kbench's "RAM" mode allocates anywhere, single-channel memory included, so it is not that ceiling).  The
+compute is clock-bound: `ada/bench/cpu/cpu_power.sh` (root, RAPL) with `avxburn` (the kernels' maddubs / madd / add
+chains) on every core: **77 W at 3975-4000 MHz**, the 5700X's 76 W PPT; one core at 4650 MHz takes 47 W; idle
+17 W; Tctl at most 65 C under load (throttling at 90).
+
+Kernel experiments (reverted): gate and up rows decoded in one loop (shared activation loads, two chains): +7% IQ2_S
+on one thread, +1.7% on 7, -2.6% IQ3_XXS, 0 IQ3_S.  On Zen 3 the gathered decodes (Intel-only in the engine) are +22%
+for IQ3_S rows of 2 tokens and slower for IQ2_S / IQ3_XXS, but the pool's experts get ~1.1 tokens each.  Power-bound,
+rearranging the same instructions buys little.
+
+The lever is PBO (step by step: `PBO-GUIDE-2026-10-26.md`): PPT ~120 W, TDC 80 A, EDC 120 A, Curve Optimizer all-core
+-10.  All-core 4.0 -> ~4.4-4.5 GHz would be ~+10-12% pool throughput: estimated ~+5-8% at C=2-4 (the pool busy
+60-72%), ~+0.5-1% at C=1 (the CPU wait ~5% of a window).  Idle power unchanged (limits only).  Not yet applied.
+
+`ada/bench/cpu/segv_bt.c`: an `LD_PRELOAD` SIGSEGV backtrace (it found the decode split's checkpoint-restore crash
+without gdb).
