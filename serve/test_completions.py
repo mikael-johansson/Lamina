@@ -123,6 +123,11 @@ class Completions(unittest.TestCase):
         self.assertEqual((b["choices"][0]["text"], b["choices"][0]["finish_reason"]), ("Hi", "length"))
         self.assertEqual(self.engine.calls[-1][2], {"temperature": 0.0, "top_p": 0.9})
 
+    def test_logit_bias_and_priority_together(self):
+        s, b = self.post({"prompt": [1], "max_tokens": 2, "logit_bias": {str(A): -100}, "priority": -10})
+        self.assertEqual(s, 200, b)
+        self.assertEqual(self.engine.calls[-1][2], {"logit_bias": {str(A): -100}, "priority": -10})
+
     def test_bad_requests_are_400(self):
         for body in ({"prompt": []}, {"prompt": [1], "max_tokens": 0}, {"prompt": [1], "n": 2},
                      {"prompt": [1], "ignore_eos": True}, {"prompt": [1], "max_tokens": 2, "allowed_token_ids": [A]},
