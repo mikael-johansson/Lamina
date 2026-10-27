@@ -75,5 +75,6 @@
   "gpu": false,
   "max_tokens": 1024
  },
- "parallel": 2
+ "parallel": 2,
+ "request_log_dir": "/d/hdd_800/logs/strata-requests"
 }

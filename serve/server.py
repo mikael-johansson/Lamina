@@ -72,6 +72,7 @@ from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve import lifeline  # noqa: E402
+from serve import request_log  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
@@ -3466,6 +3467,7 @@ class Service:
         # #332: the API request monitor (/api-monitor) keeps the last 100 requests' prompts and answers in memory,
         # so it is off unless the config's "api_monitor" (or --api-monitor) turns it on
         self.api_monitor = False
+        self.request_log_dir = None   # "request_log_dir": a log file per request there (serve/request_log.py)
         self.api_requests = collections.deque(maxlen=100)  # bounded I/O in memory; no headers or API keys
         self.request_trace = threading.local()
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
@@ -4123,9 +4125,9 @@ class Service:
 
     def begin_request(self, path, req):
         """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then)."""
-        if not self.api_monitor:
+        if not self.api_monitor and not self.request_log_dir:
             return None
-        raw = json.dumps(req, ensure_ascii=False, indent=2)
+        raw = json.dumps(req, ensure_ascii=False, indent=2) if self.api_monitor else ""
         record = {"id": uuid.uuid4().hex[:12], "path": path, "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
@@ -4134,8 +4136,9 @@ class Service:
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
                   "_clock": time.perf_counter()}
-        with self.status_lock:
-            self.api_requests.append(record)
+        if self.api_monitor:
+            with self.status_lock:
+                self.api_requests.append(record)
         self.request_trace.record = record
         return record
 
@@ -6433,6 +6436,12 @@ def make_handler(svc: Service):
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/choose"):
                     self.record = svc.begin_request(path, req)
+                    if svc.request_log_dir and path != "/v1/choose" and self.record is not None:
+                        try:
+                            self.record["_log"] = request_log.RequestLog(svc.request_log_dir, path, req, self.headers,
+                                                                         self.client_address[0])
+                        except Exception as e:                # logging must never fail a request
+                            print(f"[strata] request log: {e}", flush=True)
                 if path == "/v1/responses":
                     self._responses(req)
                 elif path.startswith("/slots/"):
@@ -6518,6 +6527,12 @@ def make_handler(svc: Service):
                         record["finished_at"] = time.time()
                         record["state"] = "error" if record.get("error") else record.get("outcome", "completed")
                     svc.request_trace.record = None
+                    rlog = record.pop("_log", None)
+                    if rlog is not None:
+                        try:
+                            rlog.finish(record)
+                        except Exception as e:
+                            print(f"[strata] request log: {e}", flush=True)
 
         def _images(self, req):
             """POST /v1/images/generations (serve/images.py): one sd-cli job in the GPU's turn."""
@@ -6722,6 +6737,13 @@ def make_handler(svc: Service):
                             delta = item["choices"][0]["delta"]
                             content, reasoning = delta.get("content", ""), delta.get("reasoning_content", "")
                             usage, timings = item.get("usage"), item.get("timings")
+                            if item["choices"][0].get("finish_reason"):
+                                self.record["finish_reason"] = item["choices"][0]["finish_reason"]
+                            if delta.get("tool_calls"):
+                                content = (content or "") + "".join(
+                                    f"[tool_call: {(tc.get('function') or {}).get('name') or ''}"
+                                    f"({(tc.get('function') or {}).get('arguments') or ''})]"
+                                    for tc in delta["tool_calls"] if isinstance(tc, dict))
                         elif api == "responses":
                             kind = item["type"]
                             content = item["delta"] if kind == "response.output_text.delta" else ""
@@ -6732,6 +6754,16 @@ def make_handler(svc: Service):
                             delta = event.get("delta", {})
                             content, reasoning = delta.get("text", ""), delta.get("thinking", "")
                             usage, timings = event.get("usage"), None
+                        rlog = self.record.get("_log")
+                        if rlog is not None:
+                            rlog.write(reasoning, content)
+                        if not svc.api_monitor:
+                            if usage:
+                                self.record["usage"] = usage
+                            if timings:
+                                self.record["timings"] = timings
+                            yield item
+                            continue
                         with svc.status_lock:
                             for name, value in (("output", content), ("reasoning", reasoning)):
                                 if value:
@@ -8125,6 +8157,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         print("[strata] Host check off: any name reaches this server (allowed_hosts \"*\")" if "*" in svc.allowed_hosts
               else f"[strata] also answers to the host names {', '.join(svc.allowed_hosts)} (allowed_hosts)", flush=True)
     svc.api_monitor = a.api_monitor or cfg.get("api_monitor") is True
+    svc.request_log_dir = cfg.get("request_log_dir") or os.environ.get("REQUEST_LOG_DIR") or None
+    if svc.request_log_dir:
+        print(f"[strata] request logs: {svc.request_log_dir}", flush=True)
     if svc.api_monitor:
         print("[strata] API request monitor on (/api-monitor): the last 100 requests' prompts and answers are kept in "
               "memory" + ("" if svc.api_key else "; anyone who can reach this server can read them (no API key)"),
