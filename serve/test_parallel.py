@@ -470,6 +470,58 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(out["voice"]["usage"]["completion_tokens"], 1)
         self.assertRegex(self.log.read_text(), r"(?m)^GEN None \d+ [12]$")    # solo, beside an active slot
 
+    def test_a_freed_slot_goes_to_the_voice_request_waiting_first(self):
+        """PRIORITY_SCHED with the voice tiers through the slots (PRIO_SOLO_MAX_TIER -1): both slots decode, a voice
+        decision waits for one, agents (T2) come after it - the slot that frees is the voice request's, not the
+        agent's whose thread wakes first (21:53 live: a T0 decision waited 18.4 s behind two later T2 requests)."""
+        self.start(2)
+        import serve.server as server
+        names = {"alpha": "a", "bravo": "b", "foxtrot": "f", "voxvox": "voice", "charlie": "c", "delta": "d", "echo": "e"}
+        done_at, claims = {}, []            # claims: who took a slot, in order (known by the prompt's words)
+        def go(k, max_tokens, priority=None):
+            text = next(w for w, n in names.items() if n == k) + (" yes or no" if k == "voice" else " LONGREPLY")
+            body = {"messages": [{"role": "user", "content": text}], "max_tokens": max_tokens, "reasoning_effort": "none"}
+            if priority is not None:
+                body["priority"] = priority
+            req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                json.loads(r.read().decode())
+            done_at[k] = time.monotonic()
+        pick = self.engine.pick_slot
+        def picked(prompt, tier=None):
+            b = pick(prompt, tier)
+            if b is not None:
+                text = bytes(int(x) & 255 for x in prompt)
+                who = [n for w, n in names.items() if w.encode() in text]
+                if who and who[0] not in claims:
+                    claims.append(who[0])
+            return b
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(server, "PRIO_SOLO_MAX_TIER", -1), \
+                mock.patch.object(server, "PRIO_RESERVED_SLOTS", 0), mock.patch.object(self.engine, "pick_slot", picked):
+            agents = [threading.Thread(target=go, args=(k, 64)) for k in ("a", "b", "f")]
+            for t in agents:                    # (three: whatever goes solo or ends, two decode in the slots)
+                t.start()
+                time.sleep(0.05)
+            until = time.monotonic() + 5
+            while not all(self.engine.slot_busy) and time.monotonic() < until:
+                time.sleep(0.01)
+            busy = list(self.engine.slot_busy)
+            voice = threading.Thread(target=go, args=("voice", 1, -20))
+            voice.start()
+            time.sleep(0.1)
+            later = [threading.Thread(target=go, args=(k, 64)) for k in ("c", "d", "e")]
+            for t in later:
+                t.start()
+                time.sleep(0.02)
+            for t in agents + [voice] + later:
+                t.join(60)
+        self.assertEqual(sorted(done_at), ["a", "b", "c", "d", "e", "f", "voice"])
+        self.assertEqual(busy, [True, True])
+        first = [n for n in claims if n not in ("a", "b", "f")]
+        self.assertEqual(first[0], "voice", claims)
+        self.assertEqual(self.engine.slot_waiters, [])
+
     def test_long_read_gives_way_to_a_voice_request(self):
         """PRIORITY_SCHED: the engine reads a prompt through (no BYIELD), so a long read that a voice request waits for
         is STOPped at its next chunk; the voice request goes first (here through a slot: PRIO_SOLO_MAX_TIER -1), and the

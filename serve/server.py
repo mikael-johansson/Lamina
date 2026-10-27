@@ -1184,6 +1184,10 @@ class StrataEngine:
             self.waiting = 0                            # requests waiting for the control lines (ctl)
             self.admitting = 0                          # #1603: ... and those that gave the lines back to wait for a slot
             self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
+            # the requests waiting for a free slot, as [tier, arrival]: a slot that frees goes to the first of them
+            # (the best tier, then the earliest), not to whichever thread its notify wakes first (21:53 live: a T0
+            # decision waited 18.4 s while two T2 requests that came after it took the slot that freed, twice)
+            self.slot_waiters: list[list[float]] = []
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
@@ -1806,6 +1810,19 @@ class StrataEngine:
         with self.slot_cv:
             return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
 
+    def _slot_turn(self, swait: list) -> bool:
+        """(The caller holds slot_cv.)  No request waiting for a slot comes before this one (`swait`: [tier, arrival];
+        the better tier first, then the earlier): a slot that frees is the first waiter's."""
+        return not any(w is not swait and w < swait for w in self.slot_waiters)
+
+    def _slot_unwait(self, swait: list) -> bool:
+        """(The caller holds slot_cv.)  `swait` out of the slot_waiters; False when it was not there."""
+        for i, w in enumerate(self.slot_waiters):
+            if w is swait:
+                del self.slot_waiters[i]
+                return True
+        return False
+
     def _shorter_waiting(self, plen: int) -> bool:
         """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
         with self.slot_cv:
@@ -1859,6 +1876,7 @@ class StrataEngine:
         prompt, left = list(ids), int(max_new)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
+        swait = [float(tier if PRIO_SCHED else 0), time.monotonic()]   # its place among the slot_waiters
         ok = yield from self._take_control(cancel, len(prompt), new=True, priority=prio)
         if not ok:
             return
@@ -1988,7 +2006,7 @@ class StrataEngine:
                             if deadline is not None and time.monotonic() >= deadline:
                                 raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                             with self.slot_cv:
-                                slot = self.pick_slot(prompt, tier)
+                                slot = self.pick_slot(prompt, tier) if self._slot_turn(swait) else None
                                 if slot is not None:
                                     self.slot_busy[slot] = True
                                     self.slot_claims.add(slot)
@@ -1996,15 +2014,20 @@ class StrataEngine:
                                     if admit_wait:
                                         admit_wait = False
                                         self.admitting = max(0, self.admitting - 1)
+                                    if self._slot_unwait(swait):
+                                        self.slot_cv.notify_all()   # (the next waiter's turn: another slot may be free)
                                     break
                                 if not admit_wait:          # #1603: counted while it waits for a slot (it holds no
                                     admit_wait, admit_since = True, time.monotonic()   # control lines then)
                                     self.admitting += 1
+                                if not any(w is swait for w in self.slot_waiters):
+                                    self.slot_waiters.append(swait)
+                                    self.slot_cv.notify_all()       # (a free slot it may not take: the first waiter's)
                             if holding:
                                 self.ctl.release()
                                 holding = False
                             with self.slot_cv:
-                                if self.pick_slot(prompt, tier) is None:
+                                if not self._slot_turn(swait) or self.pick_slot(prompt, tier) is None:
                                     if (ENGINE_STALL_S or 0) > 0 and time.monotonic() - admit_since >= ENGINE_STALL_S:
                                         # the stall check of #1317 only watches a request on the control lines; one
                                         # waiting here is covered by looking for a slot nobody owns, and by saying so
@@ -2015,7 +2038,7 @@ class StrataEngine:
                                                   f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
                                                   f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
                                     self._reap_orphan_slots()
-                                if self.pick_slot(prompt, tier) is None:
+                                if not self._slot_turn(swait) or self.pick_slot(prompt, tier) is None:
                                     wait_remaining = deadline - time.monotonic() if deadline is not None else 1.0
                                     self.slot_cv.wait(timeout=min(1.0, max(0, wait_remaining)))
                             if cancel.is_set():
@@ -2287,6 +2310,9 @@ class StrataEngine:
             if admit_wait:
                 with self.slot_cv:
                     self.admitting = max(0, self.admitting - 1)
+            with self.slot_cv:
+                if self._slot_unwait(swait):
+                    self.slot_cv.notify_all()
             if reserved is not None:
                 with self.slot_cv:
                     self.slot_busy[reserved] = False
