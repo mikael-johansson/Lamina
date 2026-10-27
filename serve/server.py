@@ -296,6 +296,49 @@ try:
 except ValueError:
     ADMIT_SHORT_FIRST = 0
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+# Priority tiers (API-PARITY-PLAN.md section 5; the ada vLLM fork's short-prefill-priority-tiers.patch): the
+# body's top-level `priority` (int, lower admits earlier, default 0) orders new admissions on the control
+# lines by tier: T0 <= -20 (voice decisions), T1 -19..-1 (voice replies), T2 0..9 (agents, the default),
+# T3 >= 10 (background).  PRIORITY_SCHED=1 (the vLLM launcher's gate, same name: one launcher logic drives
+# both boxes) switches the tiers on; with the gate off the field is accepted and ignored - vLLM's off-gate
+# quirk (200 and inert, never 400), so clients never branch on the backend.  PRIO_RESERVED_SLOTS (default
+# 1, the vLLM env name): T2/T3 together hold at most the batch slots minus that many, so the reserved ones
+# stay reachable only by T0/T1 and a voice decision still gets in behind a full house of agents.  vLLM's
+# T1 exclusive decode window (VLLM_PRIO_T1_EXCLUSIVE_TOKENS) is deliberately NOT ported: it pauses
+# lower-tier decode steps, which Strata's engine protocol has no handle on; T1 keeps admission priority
+# (and the reserved slot) only.
+try:
+    PRIO_SCHED = bool(int(os.environ.get("PRIORITY_SCHED") or 0))
+except ValueError:
+    PRIO_SCHED = False
+try:
+    PRIO_RESERVED_SLOTS = max(0, int(os.environ.get("PRIO_RESERVED_SLOTS"))) if \
+        (os.environ.get("PRIO_RESERVED_SLOTS") or "") != "" else 1
+except ValueError:
+    PRIO_RESERVED_SLOTS = 1
+
+
+def prio_tier(priority: int) -> int:
+    """The tier of a request priority - the vLLM patch's boundaries: T0 <= -20, T1 -19..-1, T2 0..9, T3 >= 10."""
+    if priority <= -20:
+        return 0
+    if priority <= -1:
+        return 1
+    return 2 if priority <= 9 else 3
+
+
+def read_priority(value) -> int:
+    """The body's top-level `priority` as an int (default 0 = T2).  Strata tolerates unknown body keys and
+    vLLM's off-gate accepts the field and ignores it, so a bad value is not a 400 here: it is T2 (0).  Numbers
+    and numeric strings are taken (vLLM's pydantic coerces "10" to 10); a bool or anything else is 0."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
 STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
 
@@ -1114,6 +1157,10 @@ class StrataEngine:
         self.slot_claims: set[int] = set()
         self.slot_releasing: set[int] = set()
         self._orphan_seen: dict[int, float] = {}
+        # priority tiers (API-PARITY-PLAN 5): each claimed slot's claimant tier (0..3), so the T2/T3 share of the
+        # pool can be capped at batch - PRIO_RESERVED_SLOTS (the reserved slots stay reachable only by T0/T1).
+        # Entries live exactly as long as the claim: every claim adds, every release/reap/park drops it.
+        self.slot_tier: dict[int, int] = {}
         # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
         # the slot that has its start (the engine checks it again); when the slot was last used
         self.slot_held: list[list[int]] = [[] for _ in range(self.batch)]
@@ -1606,6 +1653,7 @@ class StrataEngine:
             with self.slot_cv:
                 busy[slot] = False
                 releasing.discard(slot)
+                self.slot_tier.pop(slot, None)
                 self.slot_cv.notify_all()
         threading.Thread(target=wait, daemon=True).start()
 
@@ -1617,6 +1665,7 @@ class StrataEngine:
         give it back: the engine's view has caught up, or the next refusal parks it again."""
         with self.slot_cv:
             self.slot_claims.discard(slot)
+            self.slot_tier.pop(slot, None)
             self.slot_busy[slot] = True
         busy = self.slot_busy
 
@@ -1645,6 +1694,7 @@ class StrataEngine:
                 if now - first >= self.ORPHAN_SLOT_S:
                     self.slot_busy[b] = False
                     self._orphan_seen.pop(b, None)
+                    self.slot_tier.pop(b, None)
                     freed.append(b)
             else:
                 self._orphan_seen.pop(b, None)
@@ -1656,11 +1706,14 @@ class StrataEngine:
 
     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
 
-    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
+    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False,
+                      priority: int = 0):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
-        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these)."""
-        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST)
+        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these).
+        `priority`: the body's priority (API-PARITY-PLAN 5); with PRIORITY_SCHED it picks the tier."""
+        entry = [plen, time.monotonic(), new, prio_tier(priority) if PRIO_SCHED else None]
+        # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST, tier when PRIORITY_SCHED)
         with self.slot_cv:
             self.waiting += 1
             self.wait_lens.append(entry)
@@ -1677,11 +1730,11 @@ class StrataEngine:
                     raise EngineDied("the engine stopped while this request waited; it was not sent")
                 with self.slot_cv:
                     turn = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
-                    if turn and new and ADMIT_SHORT_FIRST > 0:
+                    if turn and new and (ADMIT_SHORT_FIRST > 0 or PRIO_SCHED):
                         turn = self._admit_next() is entry
                 left = deadline - time.monotonic() if deadline is not None else 0.5
                 if turn and left > 0 and self.ctl.acquire(timeout=min(0.5, left)):
-                    if new and ADMIT_SHORT_FIRST > 0:
+                    if new and (ADMIT_SHORT_FIRST > 0 or PRIO_SCHED):
                         with self.slot_cv:              # a shorter one came while this one waited in acquire()
                             first = self._admit_next() is entry
                         if not first:
@@ -1718,13 +1771,18 @@ class StrataEngine:
         """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
         next - one whose prompt is at most that long (it reads little) before a longer one, in arrival order within
         each; a longer one that has waited STRATA_ADMIT_MAX_WAIT_S counts as short (it is never held back for good).
-        Off (unset or 0): whoever gets the lock first, as before.  Only the order changes, never what is read."""
+        Off (unset or 0): whoever gets the lock first, as before.  With PRIORITY_SCHED (priority tiers,
+        API-PARITY-PLAN 5) the tier dominates: T0 before T1 before T2 before T3, and short-first stays the
+        tiebreak inside a tier (arrival order when short-first is off).  Only the order changes, never what is read."""
         now = time.monotonic()
         ordered = [e for e in self.wait_lens if len(e) > 2 and e[2]]
         if not ordered:
             return None
-        return min(ordered, key=lambda e: (0 if e[0] <= ADMIT_SHORT_FIRST or now - e[1] >= ADMIT_MAX_WAIT_S else 1,
-                                           e[1]))
+        def key(e):
+            short = 1 if (ADMIT_SHORT_FIRST > 0 and e[0] > ADMIT_SHORT_FIRST and
+                          now - e[1] < ADMIT_MAX_WAIT_S) else 0
+            return (e[3], short, e[1]) if PRIO_SCHED else (short, e[1])
+        return min(ordered, key=key)
 
     SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
     SOLO_AGAIN_MIN_LEFT = 32  # ... only with at least this many tokens still allowed (max_tokens)
@@ -1758,12 +1816,16 @@ class StrataEngine:
         self.progress, self.progress_ms, self.reused = None, 0, 0
         born = self.gen                                 # the engine process this request is sent to
         keys = self.sampling_keys(sampling or {})
+        # priority tiers (API-PARITY-PLAN 5): the body's `priority` reached us inside `sampling` (the request dict
+        # is the sampling dict on all three APIs); its tier orders the control lines and caps the slot pool.
+        prio = read_priority((sampling or {}).get("priority"))
+        tier = prio_tier(prio)
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
-        ok = yield from self._take_control(cancel, len(prompt), new=True)
+        ok = yield from self._take_control(cancel, len(prompt), new=True, priority=prio)
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -1809,10 +1871,11 @@ class StrataEngine:
                         if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
                                 self._shorter_waiting(len(prompt))):
                             with self.slot_cv:          # the slot the part read will wait in
-                                reserved = self.pick_slot(prompt)
+                                reserved = self.pick_slot(prompt, tier)
                                 if reserved is not None:
                                     self.slot_busy[reserved] = True
                                     self.slot_claims.add(reserved)
+                                    self.slot_tier[reserved] = tier
                             if reserved is not None:
                                 self._send(f"BYIELD {reserved}")
                     for x in self._control(cancel, pending.append, stop_when=others, on_quiet=give_way):
@@ -1860,10 +1923,11 @@ class StrataEngine:
                             if deadline is not None and time.monotonic() >= deadline:
                                 raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                             with self.slot_cv:
-                                slot = self.pick_slot(prompt)
+                                slot = self.pick_slot(prompt, tier)
                                 if slot is not None:
                                     self.slot_busy[slot] = True
                                     self.slot_claims.add(slot)
+                                    self.slot_tier[slot] = tier
                                     if admit_wait:
                                         admit_wait = False
                                         self.admitting = max(0, self.admitting - 1)
@@ -1875,7 +1939,7 @@ class StrataEngine:
                                 self.ctl.release()
                                 holding = False
                             with self.slot_cv:
-                                if self.pick_slot(prompt) is None:
+                                if self.pick_slot(prompt, tier) is None:
                                     if (ENGINE_STALL_S or 0) > 0 and time.monotonic() - admit_since >= ENGINE_STALL_S:
                                         # the stall check of #1317 only watches a request on the control lines; one
                                         # waiting here is covered by looking for a slot nobody owns, and by saying so
@@ -1886,7 +1950,7 @@ class StrataEngine:
                                                   f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
                                                   f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
                                     self._reap_orphan_slots()
-                                if self.pick_slot(prompt) is None:
+                                if self.pick_slot(prompt, tier) is None:
                                     wait_remaining = deadline - time.monotonic() if deadline is not None else 1.0
                                     self.slot_cv.wait(timeout=min(1.0, max(0, wait_remaining)))
                             if cancel.is_set():
@@ -2079,6 +2143,7 @@ class StrataEngine:
                             with self.slot_cv:
                                 self.slot_busy[slot] = False
                                 self.slot_claims.discard(slot)
+                                self.slot_tier.pop(slot, None)
                                 self.slot_cv.notify_all()
                             slot, gen0 = None, None
                             if reused0 is None:
@@ -2124,6 +2189,7 @@ class StrataEngine:
                 with self.slot_cv:
                     self.slot_busy[reserved] = False
                     self.slot_claims.discard(reserved)
+                    self.slot_tier.pop(reserved, None)
                     self.slot_cv.notify_all()
             if slot is not None:
                 self.slot_live[slot] = None
@@ -2134,28 +2200,44 @@ class StrataEngine:
                     with self.slot_cv:
                         self.slot_busy[slot] = False
                         self.slot_claims.discard(slot)
+                        self.slot_tier.pop(slot, None)
                         self.slot_cv.notify_all()
                 elif phase == "slot":
                     self.slot_held[slot] = []
                     stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
                     self._release_slot_when_done(slot, stream)    # freed at its BDONE
                     self.slot_claims.discard(slot)                # (the BDONE wait owns it now)
+                    self.slot_tier.pop(slot, None)
                 else:
                     with self.slot_cv:
                         self.slot_busy[slot] = False
                         self.slot_claims.discard(slot)
+                        self.slot_tier.pop(slot, None)
                         self.slot_cv.notify_all()
 
     slot_groups = 1         # --batch-groups (set when the engine starts)
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
-    def pick_slot(self, prompt: list[int]) -> int | None:
+    def _lower_slots_held(self) -> int:
+        """Priority tiers (API-PARITY-PLAN 5): busy slots held by a T2/T3 claim. A busy slot with no recorded
+        tier (parked after a BGEN refusal, an orphan flag) counts as lower, conservatively. The caller holds
+        slot_cv."""
+        t = getattr(self, "slot_tier", {})
+        return sum(1 for b, v in enumerate(self.slot_busy) if v and t.get(b, 2) >= 2)
+
+    def pick_slot(self, prompt: list[int], tier: int | None = None) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
-        conversations other slots hold stay for their next turns.  None: every slot is busy."""
+        conversations other slots hold stay for their next turns.  None: every slot is busy.
+        `tier` (priority tiers, API-PARITY-PLAN 5; vLLM patch rule 3): with PRIORITY_SCHED, T2/T3 together hold at
+        most `batch - PRIO_RESERVED_SLOTS` slots, so the reserved ones stay reachable only by T0/T1: a lower-tier
+        request that would take one gets None (it parks and waits) while a voice request behind it still gets in."""
         free = [b for b in self.slot_order if not self.slot_busy[b]]
         if not free:
+            return None
+        if PRIO_SCHED and tier is not None and tier >= 2 and \
+                self._lower_slots_held() >= max(0, self.batch - PRIO_RESERVED_SLOTS):
             return None
         gs = getattr(self, "slot_gs", 0)
         if gs > 1:
@@ -4109,6 +4191,13 @@ class Service:
         """The request with the shared thinking level and max tokens filled in where it has none of its own."""
         s = self.shared
         effort = self.effort_default()
+        # priority tiers (API-PARITY-PLAN 5): the top-level body `priority` is read at request parse on every API:
+        # normalised to an int (default 0 = T2), never rejected - vLLM's off-gate quirk: with PRIORITY_SCHED off the
+        # field is accepted and ignored (200, not 400), so clients never branch on the backend.  It rides the
+        # request dict (which is the sampling dict on all three APIs) down to StrataEngine.generate_batched.
+        if "priority" in req:
+            req = dict(req)
+            req["priority"] = read_priority(req.get("priority"))
         if not s and not effort:
             return req
         req = dict(req)

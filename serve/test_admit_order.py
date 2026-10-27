@@ -23,6 +23,7 @@ def engine_without_process(n=2):
     e.batch = n
     e.slot_busy = [False] * n
     e.slot_claims, e.slot_releasing, e._orphan_seen = set(), set(), {}
+    e.slot_tier = {}                                # (priority tiers: each claim's tier)
     e.slot_cv = threading.Condition()
     e.waiting, e.admitting, e.wait_lens, e.ctl_epoch = 0, 0, [], 0
     e.ctl = threading.Lock()
@@ -113,6 +114,27 @@ class AdmitOrderTest(unittest.TestCase):
             self.e.ctl.release()
             self.until(lambda: len(self.order) == 2, s=15.0)
         self.assertEqual(sorted(self.order), ["chat", "continuation"])
+
+    def test_priority_tiers_do_not_disturb_short_first_when_the_gate_is_off(self):
+        """PRIORITY_SCHED off (the default): a body priority is inert here too - the order is short-first alone."""
+        with mock.patch.object(server, "PRIO_SCHED", False), \
+             mock.patch.object(server, "ADMIT_SHORT_FIRST", 8192), mock.patch.object(server, "ADMIT_MAX_WAIT_S", 60.0):
+            self.assertTrue(self.e.ctl.acquire(timeout=1))
+            self.take("agent", 120000, new=True, priority=-20)      # a T0: cuts nothing with the gate off
+            self.take("chat", 500, new=True, priority=0)
+            self.until(lambda: self.e.waiting == 2)
+            self.e.ctl.release()
+            self.until(lambda: len(self.order) == 2, s=15.0)
+        self.assertEqual(self.order, ["chat", "agent"])
+
+    def test_a_waiting_entry_carries_no_tier_when_the_gate_is_off(self):
+        with mock.patch.object(server, "PRIO_SCHED", False):
+            self.assertTrue(self.e.ctl.acquire(timeout=1))
+            self.take("chat", 500, new=True, priority=-20)
+            self.until(lambda: self.e.waiting == 1)
+            entry = self.e.wait_lens[0]
+            self.assertTrue(len(entry) > 3 and entry[3] is None)    # (gate off: no tier on the entry)
+            self.e.ctl.release()
 
 
 if __name__ == "__main__":
