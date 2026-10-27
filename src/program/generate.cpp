@@ -5648,13 +5648,19 @@ int main(int argc, char** argv) {
                 // the row cannot be read: the request fails, the engine goes on)
                 if (first_window && !req_score.empty()) {
                     std::vector<float> lp(req_score.size());
-                    std::printf("LP");
-                    if (st.candidate_logprobs(req_score.data(), (int) req_score.size(), lp.data(), err))
-                        for (size_t i = 0; i < req_score.size(); ++i)
-                            std::printf(" %d:%.6g", (int) req_score[i], lp[i]);
-                    else
+                    // one printf for the whole line: a batch slot's thread prints its `BT` lines meanwhile (an
+                    // admission reads beside the slots), and a line made of several calls was cut by them
+                    std::string line_lp = "LP";
+                    if (st.candidate_logprobs(req_score.data(), (int) req_score.size(), lp.data(), err)) {
+                        char buf[48];
+                        for (size_t i = 0; i < req_score.size(); ++i) {
+                            std::snprintf(buf, sizeof buf, " %d:%.6g", (int) req_score[i], lp[i]);
+                            line_lp += buf;
+                        }
+                    } else {
                         std::fprintf(stderr, "strata serve: score=: %s\n", err.c_str());
-                    std::printf("\n");
+                    }
+                    std::printf("%s\n", line_lp.c_str());
                     ver.set_logits_wanted(false);
                 }
                 const bool fw = first_window;

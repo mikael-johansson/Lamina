@@ -848,6 +848,37 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(out["r"]["choices"][0]["message"]["content"], "ok, " + "la " * 15 + "done.")
         self.assertIn("BGEN", self.log.read_text())     # (a decision went through an admission)
 
+    def test_scores_under_priority_beside_a_solo_stream_and_a_long_read(self):
+        """PRIORITY_SCHED with voice through the slots (PRIO_SOLO_MAX_TIER -1): a decision's LP line still reaches it
+        beside a decoding solo request and while a long read gives way to it (live: 400 "no log-probabilities")."""
+        self.start(2)
+        self.engine.VOICE_STOP_MIN = 0
+        import serve.server as server
+        decision = {"prompt": list(b"hello"), "max_tokens": 1, "allowed_token_ids": [ord("A"), ord("B")],
+                    "logprobs": 2, "return_tokens_as_token_ids": True, "priority": -20}
+        errors = []
+        def decide():
+            req = urllib.request.Request(self.base + "/v1/completions", data=json.dumps(decision).encode(),
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    d = json.loads(r.read().decode())
+                if d["choices"][0]["text"] != "A":
+                    errors.append(d)
+            except urllib.error.HTTPError as e:
+                errors.append((e.code, e.read().decode()))
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(server, "PRIO_SOLO_MAX_TIER", -1):
+            for text in ("go on LONGREPLY", "a long agent context " * 150):
+                out = {}
+                agent = threading.Thread(target=lambda: out.update(r=self.chat(text, max_tokens=64)))
+                agent.start()
+                for _ in range(6):
+                    time.sleep(0.1)
+                    decide()
+                agent.join(30)
+                self.assertIn("r", out)
+        self.assertEqual(errors, [])
+
     def test_completions_stream_in_a_batch_slot(self):
         """A streamed /v1/completions reply in --batch mode stops at its stop id (not in the text), as vLLM."""
         self.start(2)

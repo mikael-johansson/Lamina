@@ -1812,6 +1812,7 @@ class StrataEngine:
             return any(e[0] * 2 <= plen for e in self.wait_lens)
 
     VOICE_STOP_MIN = 4096   # a read with fewer tokens left than this ends before a STOP would gain anything
+    VOICE_STOP = True       # "prio_voice_stop": false turns the STOP give-way off (an engine hang after one, 10:49 live)
 
     def _read_left(self) -> int:
         """The prompt tokens the read on the control lines has left (from its PP lines; unknown: a lot)."""
@@ -1903,7 +1904,7 @@ class StrataEngine:
 
                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
                         nonlocal reserved, voice_stop
-                        if (not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                        if (self.VOICE_STOP and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")
                             voice_stop = True
@@ -2056,7 +2057,7 @@ class StrataEngine:
 
                     def ask():        # as give_way above, for the slot this admission reads into
                         nonlocal asked, voice_stop
-                        if (not asked and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                        if (self.VOICE_STOP and not asked and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")           # (this engine ignores BYIELD: see voice_stop)
                             voice_stop = asked = True
@@ -8488,6 +8489,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         PRIO_SCHED = cfg.get("priority_sched") is True
     if "PRIO_RESERVED_SLOTS" not in os.environ and isinstance(cfg.get("prio_reserved_slots"), int):
         PRIO_RESERVED_SLOTS = max(0, cfg["prio_reserved_slots"])
+    if cfg.get("prio_voice_stop") is False:
+        StrataEngine.VOICE_STOP = False
     if "PRIO_SOLO_MAX_TIER" not in os.environ and isinstance(cfg.get("prio_solo_max_tier"), int):
         PRIO_SOLO_MAX_TIER = cfg["prio_solo_max_tier"]
     if PRIO_SCHED:
