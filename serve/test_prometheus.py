@@ -62,6 +62,23 @@ class Units(unittest.TestCase):
         self.assertEqual(s["e2e"][2], 2)
         self.assertEqual(counts, sorted(counts))
 
+    def test_stage_split_histograms(self):
+        lat = Latencies()
+        lat.observe(0.3, 11, 1.0, 1.5, queue_s=0.2, prefill_s=0.4)   # inference 1.4, tpot 0.1
+        lat.observe(0.1, 5, 0.5, 0.7)                                # no queue/prefill figures
+        s = lat.snapshot()
+        self.assertEqual(s["queue"][2], 1)                          # only the first said
+        self.assertAlmostEqual(s["queue"][1], 0.2)
+        self.assertEqual(s["prefill"][2], 1)
+        self.assertEqual(s["inference"][2], 2)                      # both had decode: prefill+decode
+        self.assertAlmostEqual(s["inference"][1], 1.4 + 0.5)
+        self.assertEqual(s["decode"][2], 2)                         # both had decode
+        self.assertAlmostEqual(s["decode"][1], 1.5)
+        self.assertEqual(s["tpot"][2], 2)                           # one sample per request
+        self.assertAlmostEqual(s["tpot"][1], 0.1 + 0.125)
+        self.assertEqual(lat.snapshot().keys(),
+                         {"ttft", "itl", "e2e", "queue", "prefill", "decode", "inference", "tpot"})
+
     def test_render_reads_the_server_record(self):
         m = {"engine": {"model": 'a "b"', "max_context": 1000},
              "live": {"state": "generating", "queued": 2, "prompt_tokens": 400, "generated": 100},
@@ -73,8 +90,16 @@ class Units(unittest.TestCase):
         self.assertEqual(got[("vllm:num_requests_waiting", lab)], 2)
         self.assertEqual(got[("vllm:kv_cache_usage_perc", lab)], 0.5)
         self.assertEqual(got[("vllm:prefix_cache_hits_total", lab)], 600)
+        self.assertEqual(got[("vllm:prompt_tokens_cached_total", lab)], 600)   # tokens, as vLLM counts them
         self.assertEqual(got[("vllm:spec_decode_num_accepted_tokens_total", lab)], 30)
         self.assertEqual(got[("vllm:time_to_first_token_seconds_count", lab)], 0)
+        # every vLLM-named latency family, with its TYPE line (parse() asserts HELP/TYPE precede samples)
+        text = render(m, Latencies().snapshot())
+        for family in ("vllm:request_queue_time_seconds", "vllm:request_prefill_time_seconds",
+                       "vllm:request_decode_time_seconds", "vllm:request_inference_time_seconds",
+                       "vllm:request_time_per_output_token_seconds"):
+            self.assertIn(f"# TYPE {family} histogram", text)
+            self.assertEqual(got[(f"{family}_count", lab)], 0)
 
     def test_strata_names_follow_the_json(self):
         m = {"engine": {"model": "m", "max_context": 1000},

@@ -36,24 +36,36 @@ class Histogram:
 
 
 class Latencies:
-    """Time to first token, the time between tokens and the whole request, per finished request."""
+    """Per finished request: time to first token, the time between tokens, the whole request, and the vLLM-named
+    stage splits — queue wait, prefill, decode, prefill+decode (inference) and the per-output-token gap."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.ttft, self.itl, self.e2e = Histogram(), Histogram(), Histogram()
+        self.queue, self.prefill, self.decode, self.inference, self.tpot = (
+            Histogram(), Histogram(), Histogram(), Histogram(), Histogram())
 
-    def observe(self, ttft_s, output_tokens, decode_s, total_s):
+    def observe(self, ttft_s, output_tokens, decode_s, total_s, queue_s=None, prefill_s=None):
         with self.lock:
             self.ttft.observe(ttft_s)
             if output_tokens and output_tokens > 1 and decode_s:
                 # the mean gap, once per gap: the engine reports the decode time, not each token's
                 self.itl.observe(decode_s / (output_tokens - 1), output_tokens - 1)
+                # vLLM's tpot is one sample per request, not one per gap
+                self.tpot.observe(decode_s / (output_tokens - 1))
             self.e2e.observe(total_s)
+            self.queue.observe(queue_s)
+            self.prefill.observe(prefill_s)
+            self.decode.observe(decode_s or None)        # 0.0 means the engine did not say: no sample
+            if prefill_s or decode_s:
+                self.inference.observe((prefill_s or 0.0) + (decode_s or 0.0))
 
     def snapshot(self):
         with self.lock:
             return {k: (list(h.counts), h.sum, h.n) for k, h in
-                    (("ttft", self.ttft), ("itl", self.itl), ("e2e", self.e2e))}
+                    (("ttft", self.ttft), ("itl", self.itl), ("e2e", self.e2e),
+                     ("queue", self.queue), ("prefill", self.prefill), ("decode", self.decode),
+                     ("inference", self.inference), ("tpot", self.tpot))}
 
 
 def _num(v, default=0):
@@ -88,6 +100,10 @@ def render(m: dict, lat: dict) -> str:
            _num(totals.get("prompt_tokens")))
     metric("vllm:prefix_cache_hits_total", "counter", "Prompt tokens the prompt cache already held.",
            _num(totals.get("reused")))
+    # vLLM counts these three in tokens, not requests: totals.reused is the engine's own cache-hit token count,
+    # so prompt_tokens_cached_total == prefix_cache_hits_total and queries == the prompt tokens of finished requests.
+    metric("vllm:prompt_tokens_cached_total", "counter", "Prompt tokens the conversation cache already held.",
+           _num(totals.get("reused")))
     metric("vllm:spec_decode_num_draft_tokens_total", "counter", "MTP draft tokens offered.",
            _num(totals.get("drafts_offered")))
     metric("vllm:spec_decode_num_accepted_tokens_total", "counter", "MTP draft tokens accepted.",
@@ -95,7 +111,15 @@ def render(m: dict, lat: dict) -> str:
     metric("vllm:num_preemptions_total", "counter", "Preempted requests (Strata does not preempt).", 0)
     for name, key, help_ in (("vllm:time_to_first_token_seconds", "ttft", "Time to the first token."),
                              ("vllm:inter_token_latency_seconds", "itl", "Time between two tokens."),
-                             ("vllm:e2e_request_latency_seconds", "e2e", "A request from start to end.")):
+                             ("vllm:e2e_request_latency_seconds", "e2e", "A request from start to end."),
+                             ("vllm:request_queue_time_seconds", "queue",
+                              "A request waiting for its turn before the engine took it."),
+                             ("vllm:request_prefill_time_seconds", "prefill", "Reading the prompt (engine time)."),
+                             ("vllm:request_decode_time_seconds", "decode", "Generating (engine time)."),
+                             ("vllm:request_inference_time_seconds", "inference",
+                              "Prefill plus decode (engine time)."),
+                             ("vllm:request_time_per_output_token_seconds", "tpot",
+                              "The mean gap between output tokens, one sample per request.")):
         counts, total, n = lat[key]
         out.append(f"# HELP {name} {help_}\n# TYPE {name} histogram")
         for b, c in zip(BUCKETS, counts):
