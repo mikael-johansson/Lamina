@@ -119,6 +119,12 @@ while True:
             continue
         # #1994: the engine's own view of its slots differs: BUSYSLOT is refused once, BUSYALL always
         pbx = bytes(int(x) & 255 for x in ids)
+        if slot is not None and b"NOROOM" in pbx:   # the K/V pool cannot hold it beside the others: always refused
+            print(f"ERR BGEN: no room for a conversation of {len(ids)} tokens (a slot holds 262144; the K/V pool has "
+                  f"60 cells free)", flush=True)
+            if log:
+                log.write(f"REFUSED {slot}\n"); log.flush()
+            continue
         if slot is not None and (b"BUSYALL" in pbx or (b"BUSYSLOT" in pbx and "busyslot" not in fired)):
             fired.add("busyslot")
             print(f"ERR BGEN: no such free slot (--batch {slots}) or a bad max_new", flush=True)
@@ -411,6 +417,20 @@ class ParallelService(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(self.engine.slot_busy, [False, False])
         self.assertEqual(self.chat("fine again")["choices"][0]["message"]["content"], "ok, done.")
+
+    def test_bgen_without_room_waits_and_goes_solo_not_a_503(self):
+        """The engine has no K/V room for the conversation beside the others ("no room for a conversation"): it is
+        not the slot's state, so the request waits for the busy slot to end and runs on the solo path - never the
+        six refusals' 503 (live: 22 of them in 15 minutes of two long Hermes conversations)."""
+        self.start(2)
+        out = self._two_at_once("NOROOM hello")
+        self.assertEqual(out["a"][0], "ok", out["a"])
+        self.assertEqual(out["b"][0], "ok", out["b"])
+        log = self.log.read_text()
+        self.assertEqual(log.count("REFUSED"), 1, log)
+        self.assertIn("GEN None", log)          # b's solo GEN after a ended
+        time.sleep(0.5)
+        self.assertEqual(self.engine.slot_busy, [False, False])
 
     def test_engine_reports_fewer_slots(self):
         self.start(4, fit=2)

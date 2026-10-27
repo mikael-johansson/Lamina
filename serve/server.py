@@ -1766,6 +1766,7 @@ class StrataEngine:
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
         stop_sent = False
         yields, solo_again, refused = 0, 0, 0
+        wait_top, force_solo = False, False   # refused for its kind (an image, no K/V room): waited, from the top
         admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
@@ -1775,7 +1776,8 @@ class StrataEngine:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
                 with self.slot_cv:
-                    alone = not any(self.slot_busy) and self.waiting == 0
+                    alone = not any(self.slot_busy) and (self.waiting == 0 or force_solo)
+                force_solo = False
                 if alone and left > 1:
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
@@ -1949,6 +1951,48 @@ class StrataEngine:
                         # for a moment (busy here too), and wait for another one - never a 400 for the conversation.
                         if not (self._ctl_erred and str(e).startswith("BGEN:") and left >= 1 and not cancel.is_set()):
                             raise
+                        alone_only = "images go through the solo path" in str(e)
+                        if alone_only or "no room for a conversation" in str(e):
+                            # not the slot's state but this request's: an image goes through the solo path only (once
+                            # no slot is busy), a conversation the K/V pool has no room for beside the others waits
+                            # for one of them to end (and goes solo when none is left).  Not a refusal to count (6 of
+                            # them were a 503 for every image and long conversation under load)
+                            self.slot_live[slot] = None
+                            self.slot_held[slot] = []
+                            phase = "none"
+                            self._ctl_erred = False
+                            with self.slot_cv:
+                                self.slot_busy[slot] = False
+                                self.slot_claims.discard(slot)
+                                self.slot_cv.notify_all()
+                            slot = None
+                            if holding:
+                                self.ctl.release()
+                                holding = False
+                            with self.slot_cv:
+                                busy0 = sum(1 for b in self.slot_busy if b)
+                                if not admit_wait:
+                                    admit_wait, admit_since = True, time.monotonic()
+                                    self.admitting += 1
+                            print(f"[strata] parallel: {e}; waiting for {'the slots' if alone_only else 'a slot'} "
+                                  f"to finish ({busy0} busy)", flush=True)
+                            with self.slot_cv:
+                                while not cancel.is_set():
+                                    n = sum(1 for b in self.slot_busy if b)
+                                    if n == 0 or (not alone_only and n < busy0):
+                                        break
+                                    deadline = getattr(cancel, "_strata_queue_deadline", None)
+                                    if deadline is not None and time.monotonic() >= deadline:
+                                        raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                                    self.slot_cv.wait(timeout=1.0)
+                                force_solo = n == 0
+                                if admit_wait:
+                                    admit_wait = False
+                                    self.admitting = max(0, self.admitting - 1)
+                            if cancel.is_set():
+                                return
+                            wait_top = True
+                            break
                         refused += 1
                         print(f"[strata] parallel: the engine refused slot {slot} ({e}); trying another slot "
                               f"({refused}/{self.BGEN_REFUSALS_MAX}) (issue #1994)", flush=True)
@@ -1973,6 +2017,9 @@ class StrataEngine:
                     if not cont and self._yielded is not None and self._yielded[0] == slot and not cancel.is_set():
                         continue                            # gave way: again once the shorter request is in
                     break
+                if wait_top:
+                    wait_top = False
+                    continue
                 self.ctl.release()
                 holding = False
                 if not cont:
