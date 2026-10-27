@@ -260,6 +260,23 @@ class PickSlot(unittest.TestCase):
         e.slot_group = [0] * n
         return e
 
+    def test_the_reserved_slot_only_while_voice_is_active(self):
+        """prio_reserve_while_voice_s: the reserved slot is held back from the agents (T2) only that long after the
+        last voice request; without one recently, they have every slot."""
+        import serve.server as server
+        e = self.engine(2)
+        e.slot_busy[0], e.slot_tier = True, {0: 2}
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(server, "PRIO_RESERVED_SLOTS", 1), \
+                mock.patch.object(StrataEngine, "RESERVE_WHILE_VOICE_S", 30.0):
+            self.assertEqual(e.pick_slot([7, 8], 2), 1)               # no voice yet: the agent gets it
+            e.voice_seen_at = time.monotonic()
+            self.assertIsNone(e.pick_slot([7, 8], 2))                 # voice active: held back for it
+            self.assertEqual(e.pick_slot([7, 8], 0), 1)               # ... and the voice request gets it
+            e.voice_seen_at = time.monotonic() - 31
+            self.assertEqual(e.pick_slot([7, 8], 2), 1)               # quiet again
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(server, "PRIO_RESERVED_SLOTS", 1):
+            self.assertIsNone(e.pick_slot([7, 8], 2))                 # 0 s: always reserved, as configured
+
     def test_the_slot_that_holds_the_conversation(self):
         e = self.engine(3)
         e.slot_held = [[1, 2, 3], [], [1, 2, 3, 4, 5]]
@@ -326,6 +343,41 @@ class PickSlot(unittest.TestCase):
         self.assertEqual(v[0]["state"], "decoding")
         self.assertEqual(v[0]["generated"], 4)
         self.assertEqual(v[1], {"slot": 1, "state": "idle", "held_tokens": 2})
+
+
+class ControlOrder(unittest.TestCase):
+    def test_a_request_taking_the_lines_again_waits_behind_a_voice_request(self):
+        """PRIORITY_SCHED: an agent taking the control lines again (its read gave way, or it waited for a slot: not a
+        new request) does not take them before a voice request waiting for them (22:32 live: agents' 3K re-reads, one
+        after another, held a T0 decision 10.8 s)."""
+        import serve.server as server
+        e = StrataEngine("missing-executable", [], lazy=True)
+        e.slot_cv, e.ctl = threading.Condition(), threading.Lock()
+        e.waiting, e.wait_lens, e.ctl_epoch = 0, [], 0
+        e.alive = lambda: True
+        order = []
+        def take(name, **kw):
+            for _ in e._take_control(threading.Event(), 30, **kw):
+                pass
+            order.append(name)
+            time.sleep(0.05)
+            e.ctl.release()
+        with mock.patch.object(server, "PRIO_SCHED", True):
+            e.ctl.acquire()                     # a long read holds them
+            voice = threading.Thread(target=take, args=("voice",), kwargs={"new": True, "priority": -20})
+            agents = [threading.Thread(target=take, args=(f"agent{k}",), kwargs={"priority": 0}) for k in range(3)]
+            for t in agents:                    # (they wait in acquire() first)
+                t.start()
+            time.sleep(0.2)
+            voice.start()
+            until = time.monotonic() + 5
+            while e.waiting < 4 and time.monotonic() < until:
+                time.sleep(0.01)
+            e.ctl.release()
+            for t in [voice] + agents:
+                t.join(10)
+        self.assertEqual(order[0], "voice", order)
+        self.assertEqual(len(order), 4)
 
 
 class ParallelService(unittest.TestCase):

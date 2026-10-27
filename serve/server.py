@@ -1745,11 +1745,14 @@ class StrataEngine:
                     turn = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
                     if turn and new and (ADMIT_SHORT_FIRST > 0 or PRIO_SCHED):
                         turn = self._admit_next() is entry
+                    elif turn and PRIO_SCHED:           # a request taking them again (its read gave way, or it waited
+                        turn = not self._better_tier_waiting(entry)   # for a slot): not before a better tier (22:32
+                                                        # live: agents' 3K re-reads, one after another, held a T0 10.8 s)
                 left = deadline - time.monotonic() if deadline is not None else 0.5
                 if turn and left > 0 and self.ctl.acquire(timeout=min(0.5, left)):
-                    if new and (ADMIT_SHORT_FIRST > 0 or PRIO_SCHED):
-                        with self.slot_cv:              # a shorter one came while this one waited in acquire()
-                            first = self._admit_next() is entry
+                    if (new and (ADMIT_SHORT_FIRST > 0 or PRIO_SCHED)) or PRIO_SCHED:
+                        with self.slot_cv:              # a shorter one (a better tier) came while this one waited in acquire()
+                            first = self._admit_next() is entry if new else not self._better_tier_waiting(entry)
                         if not first:
                             self.ctl.release()
                             with self.slot_cv:
@@ -1779,6 +1782,13 @@ class StrataEngine:
             self.ctl_epoch += 1
             self.slot_cv.notify_all()
         return True
+
+    def _better_tier_waiting(self, entry) -> bool:
+        """(The caller holds slot_cv.)  PRIORITY_SCHED: a request of a better tier than `entry`'s waits for the
+        control lines."""
+        t = entry[3] if len(entry) > 3 else None
+        return t is not None and any(e is not entry and len(e) > 3 and e[3] is not None and e[3] < t
+                                     for e in self.wait_lens)
 
     def _admit_next(self):
         """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
@@ -1827,6 +1837,10 @@ class StrataEngine:
         """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
         with self.slot_cv:
             return any(e[0] * 2 <= plen for e in self.wait_lens)
+
+    # "prio_reserve_while_voice_s": the reserved slots (PRIO_RESERVED_SLOTS) are held back from T2/T3 only this long after
+    # the last voice request (T0/T1), so the agents have every slot while nobody talks; 0: always, as configured
+    RESERVE_WHILE_VOICE_S = 0.0
 
     VOICE_STOP_MIN = 4096   # a read with fewer tokens left than this ends before a STOP would gain anything
     VOICE_STOP = True       # "prio_voice_stop": false turns the STOP give-way off (an engine hang after one, 10:49 live)
@@ -1877,6 +1891,8 @@ class StrataEngine:
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         swait = [float(tier if PRIO_SCHED else 0), time.monotonic()]   # its place among the slot_waiters
+        if PRIO_SCHED and tier <= 1:
+            self.voice_seen_at = swait[1]               # (RESERVE_WHILE_VOICE_S: the reserved slots held back from now)
         ok = yield from self._take_control(cancel, len(prompt), new=True, priority=prio)
         if not ok:
             return
@@ -1892,7 +1908,7 @@ class StrataEngine:
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
-                    ok = yield from self._take_control(cancel, len(prompt))
+                    ok = yield from self._take_control(cancel, len(prompt), priority=prio)
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -1979,7 +1995,7 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("gave way to a voice request")
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
                         if not ok:
                             return
                         holding, born = True, self.gen
@@ -2044,7 +2060,7 @@ class StrataEngine:
                             if cancel.is_set():
                                 return
                             if not holding:
-                                ok = yield from self._take_control(cancel, len(prompt))
+                                ok = yield from self._take_control(cancel, len(prompt), priority=prio)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -2056,7 +2072,7 @@ class StrataEngine:
                         holding = False
                         with self.slot_cv:
                             epoch = self.ctl_epoch
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
                         if not ok:
                             return
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -2207,7 +2223,7 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("admission gave way to a voice request")
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
                         if not ok:
                             return
                         holding, born = True, self.gen
@@ -2347,6 +2363,14 @@ class StrataEngine:
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
+    def _reserved_now(self) -> int:
+        """The slots held back for T0/T1 now: PRIO_RESERVED_SLOTS, with RESERVE_WHILE_VOICE_S only that long after the
+        last voice request."""
+        if self.RESERVE_WHILE_VOICE_S <= 0:
+            return PRIO_RESERVED_SLOTS
+        seen = getattr(self, "voice_seen_at", None)
+        return PRIO_RESERVED_SLOTS if seen is not None and time.monotonic() - seen < self.RESERVE_WHILE_VOICE_S else 0
+
     def _lower_slots_held(self) -> int:
         """Priority tiers (API-PARITY-PLAN 5): busy slots held by a T2/T3 claim. A busy slot with no recorded
         tier (parked after a BGEN refusal, an orphan flag) counts as lower, conservatively. The caller holds
@@ -2365,7 +2389,7 @@ class StrataEngine:
         if not free:
             return None
         if PRIO_SCHED and tier is not None and tier >= 2 and \
-                self._lower_slots_held() >= max(0, self.batch - PRIO_RESERVED_SLOTS):
+                self._lower_slots_held() >= max(0, self.batch - self._reserved_now()):
             return None
         gs = getattr(self, "slot_gs", 0)
         if gs > 1:
@@ -8532,12 +8556,16 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         StrataEngine.VOICE_PAUSE = False
     if isinstance(cfg.get("prio_voice_chunk"), int) and not isinstance(cfg.get("prio_voice_chunk"), bool):
         StrataEngine.VOICE_CHUNK = max(0, cfg["prio_voice_chunk"])
+    if isinstance(cfg.get("prio_reserve_while_voice_s"), (int, float)) and not isinstance(cfg.get("prio_reserve_while_voice_s"), bool):
+        StrataEngine.RESERVE_WHILE_VOICE_S = max(0.0, float(cfg["prio_reserve_while_voice_s"]))
     if "PRIO_SOLO_MAX_TIER" not in os.environ and isinstance(cfg.get("prio_solo_max_tier"), int):
         PRIO_SOLO_MAX_TIER = cfg["prio_solo_max_tier"]
     if PRIO_SCHED:
         solo = {1: "T0 and T1", 0: "T0"}.get(PRIO_SOLO_MAX_TIER, "no tier")
         print(f"[strata] priority tiers on (T0 <= -20, T1 -19..-1; {solo} on the solo path beside the slots; "
-              f"{PRIO_RESERVED_SLOTS} slot(s) reserved)", flush=True)
+              f"{PRIO_RESERVED_SLOTS} slot(s) reserved" +
+              (f" for {StrataEngine.RESERVE_WHILE_VOICE_S:g} s after a voice request" if
+               StrataEngine.RESERVE_WHILE_VOICE_S > 0 and PRIO_RESERVED_SLOTS else "") + ")", flush=True)
     if svc.request_log_dir:
         print(f"[strata] request logs: {svc.request_log_dir}", flush=True)
     if svc.api_monitor:
