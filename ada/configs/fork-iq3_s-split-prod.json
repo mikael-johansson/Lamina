@@ -11,6 +11,8 @@
   "auto",
   "--prefill",
   "16384",
+  "--prompt-cache",
+  "128",
   "--feed-max",
   "46",
   "--spec",
