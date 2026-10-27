@@ -318,6 +318,13 @@ try:
         (os.environ.get("PRIO_RESERVED_SLOTS") or "") != "" else 1
 except ValueError:
     PRIO_RESERVED_SLOTS = 1
+# the tiers that take the solo path beside decoding slots (the engine pauses the slots for them): 1 = T0 decisions and
+# T1 replies (vLLM's T1 exclusive window in effect), 0 = decisions only (a reply then decodes in a slot, ~130 tok/s,
+# and the agents are paused only for the decisions' ~0.1-0.2 s each), -1 = none
+try:
+    PRIO_SOLO_MAX_TIER = int(os.environ.get("PRIO_SOLO_MAX_TIER") or 1)
+except ValueError:
+    PRIO_SOLO_MAX_TIER = 1
 
 
 def prio_tier(priority: int) -> int:
@@ -1831,7 +1838,7 @@ class StrataEngine:
         # is the sampling dict on all three APIs); its tier orders the control lines and caps the slot pool.
         prio = read_priority((sampling or {}).get("priority"))
         tier = prio_tier(prio)
-        voice = PRIO_SCHED and tier <= 1 and not embeddings
+        voice = PRIO_SCHED and tier <= PRIO_SOLO_MAX_TIER and not embeddings
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
@@ -8413,13 +8420,16 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.request_log_dir = cfg.get("request_log_dir") or os.environ.get("REQUEST_LOG_DIR") or None
     # priority tiers (API-PARITY-PLAN 5) from the config too ("priority_sched": true, "prio_reserved_slots": N): the
     # env names (PRIORITY_SCHED, PRIO_RESERVED_SLOTS) stay the vLLM launcher's and win when set
-    global PRIO_SCHED, PRIO_RESERVED_SLOTS
+    global PRIO_SCHED, PRIO_RESERVED_SLOTS, PRIO_SOLO_MAX_TIER
     if "PRIORITY_SCHED" not in os.environ and cfg.get("priority_sched") is not None:
         PRIO_SCHED = cfg.get("priority_sched") is True
     if "PRIO_RESERVED_SLOTS" not in os.environ and isinstance(cfg.get("prio_reserved_slots"), int):
         PRIO_RESERVED_SLOTS = max(0, cfg["prio_reserved_slots"])
+    if "PRIO_SOLO_MAX_TIER" not in os.environ and isinstance(cfg.get("prio_solo_max_tier"), int):
+        PRIO_SOLO_MAX_TIER = cfg["prio_solo_max_tier"]
     if PRIO_SCHED:
-        print(f"[strata] priority tiers on (T0 <= -20, T1 -19..-1: the solo path beside the slots; "
+        solo = {1: "T0 and T1", 0: "T0"}.get(PRIO_SOLO_MAX_TIER, "no tier")
+        print(f"[strata] priority tiers on (T0 <= -20, T1 -19..-1; {solo} on the solo path beside the slots; "
               f"{PRIO_RESERVED_SLOTS} slot(s) reserved)", flush=True)
     if svc.request_log_dir:
         print(f"[strata] request logs: {svc.request_log_dir}", flush=True)
