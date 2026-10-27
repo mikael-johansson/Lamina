@@ -1,5 +1,5 @@
 {
- "exe": "/home/mikaeljo/git/strata/eddoursul/build/strata.dsplit-roll2",
+ "exe": "/home/mikaeljo/git/strata/eddoursul/build/strata.dsplit-roll4",
  "args": [
   "--pack",
   "/d/nvme_512/strata-data/packs/iq3_s",
@@ -82,5 +82,5 @@
  "priority_sched": true,
  "prio_reserved_slots": 0,
  "prio_solo_max_tier": -1,
- "prio_voice_stop": false
+ "prio_voice_stop": true
 }

@@ -4842,9 +4842,12 @@ int main(int argc, char** argv) {
             top1.plan(worst_loan(off));
             int64_t end1 = top1.first >= 0 ? top1.first : xcache.slots();
             if (kvg.on) {   // the whole context's K/V under the loan
+                // below the slots the K/V holds already ([lo, top)): qsa_kv_elastic_need counts only the chunks it
+                // has still to map, so a region laid out after the K/V grew (the first batch slot after a long solo
+                // read) reached into them from `top` down - its memset then hit unmapped VRAM ("invalid argument")
                 const uint64_t G = strata::core::vmm_granularity();
                 const uint64_t kvb = (uint64_t) strata::core::qsa_kv_elastic_need(o.max_context + 64) * G + G;
-                end1 = std::min<int64_t>(end1, kvg.top);
+                end1 = std::min<int64_t>(end1, kvg.lo);
                 const uint64_t t = top1.offset(end1);
                 while (end1 > (int64_t) pin1.size() && t - top1.offset(end1) < kvb) --end1;
             }
@@ -4971,11 +4974,35 @@ int main(int argc, char** argv) {
             l2.lend();
             const auto [p1, n1] = own1[(size_t) b.id];
             const auto [p2, n2] = own2[(size_t) b.id];
-            const bool ok1 = cudaMemset(p1, 0, (size_t) n1) == cudaSuccess;   // its own bytes only (a loan's edge
+            const cudaError_t pre1 = cudaGetLastError();                     // (an earlier call's error, said below)
+            const cudaError_t m1 = cudaMemset(p1, 0, (size_t) n1);           // its own bytes only (a loan's edge
             cudaSetDevice(dev2);                                              // slots reach into its neighbours')
-            const bool ok2 = cudaMemset(p2, 0, (size_t) n2) == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+            const cudaError_t pre2 = cudaGetLastError();
+            const cudaError_t m2 = cudaMemset(p2, 0, (size_t) n2);
+            const cudaError_t s2 = cudaDeviceSynchronize();
             cudaSetDevice(o.main_gpu);
-            return ok1 && ok2 && cudaDeviceSynchronize() == cudaSuccess;
+            const cudaError_t s1 = cudaDeviceSynchronize();
+            if (m1 == cudaSuccess && m2 == cudaSuccess && s1 == cudaSuccess && s2 == cudaSuccess) return true;
+            // what failed, where, and against which cache bounds; the errors cleared (a later kernel's check() reads
+            // cudaGetLastError and took this one for its own: "prefill q8_to_bf16: invalid argument", 10:49 live) and
+            // the loans given back, so a retry lends and zeroes the parts again instead of finding them "lent"
+            std::fprintf(stderr, "strata serve: lending batch slot %d's own parts failed: memset %s / %s, sync %s / %s, "
+                                 "pending before %s / %s; parts %p +%llu MiB (cache %p +%llu MiB, loan slots %d-%lld) and "
+                                 "%p +%llu MiB (cache %p +%llu MiB, loan slots %d-%lld)\n", b.id,
+                         cudaGetErrorString(m1), cudaGetErrorString(m2), cudaGetErrorString(s1), cudaGetErrorString(s2),
+                         cudaGetErrorString(pre1), cudaGetErrorString(pre2),
+                         (void*) p1, (unsigned long long) (n1 >> 20), (void*) xcache.device_slot(0),
+                         (unsigned long long) (xcache.bytes() >> 20), l1.first, (long long) l1.top(),
+                         (void*) p2, (unsigned long long) (n2 >> 20), (void*) gpu2.cache().device_slot(0),
+                         (unsigned long long) (gpu2.cache().bytes() >> 20), l2.first, (long long) l2.top());
+            (void) cudaGetLastError();
+            cudaSetDevice(dev2);
+            (void) cudaGetLastError();
+            cudaSetDevice(o.main_gpu);
+            std::string ge;
+            l1.give_back(*srcp, g.n_expert, ge);
+            l2.give_back(*srcp, g.n_expert, ge);
+            return false;
         };
         // a slot's windows and drafter, once
         auto make_slot = [&](BatchSlot& b, std::string& e) -> bool {
