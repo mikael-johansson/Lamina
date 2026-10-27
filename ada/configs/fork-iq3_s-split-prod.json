@@ -1,5 +1,5 @@
 {
- "exe": "/home/mikaeljo/git/strata/eddoursul/build/strata.dsplit",
+ "exe": "/home/mikaeljo/git/strata/eddoursul/build/strata.dsplit-roll",
  "args": [
   "--pack",
   "/d/nvme_512/strata-data/packs/iq3_s",
@@ -78,5 +78,7 @@
   "max_tokens": 1024
  },
  "parallel": 2,
- "request_log_dir": "/d/hdd_800/logs/strata-requests"
+ "request_log_dir": "/d/hdd_800/logs/strata-requests",
+ "priority_sched": true,
+ "prio_reserved_slots": 0
 }

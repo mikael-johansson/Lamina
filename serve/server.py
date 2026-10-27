@@ -8411,6 +8411,16 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
               else f"[strata] also answers to the host names {', '.join(svc.allowed_hosts)} (allowed_hosts)", flush=True)
     svc.api_monitor = a.api_monitor or cfg.get("api_monitor") is True
     svc.request_log_dir = cfg.get("request_log_dir") or os.environ.get("REQUEST_LOG_DIR") or None
+    # priority tiers (API-PARITY-PLAN 5) from the config too ("priority_sched": true, "prio_reserved_slots": N): the
+    # env names (PRIORITY_SCHED, PRIO_RESERVED_SLOTS) stay the vLLM launcher's and win when set
+    global PRIO_SCHED, PRIO_RESERVED_SLOTS
+    if "PRIORITY_SCHED" not in os.environ and cfg.get("priority_sched") is not None:
+        PRIO_SCHED = cfg.get("priority_sched") is True
+    if "PRIO_RESERVED_SLOTS" not in os.environ and isinstance(cfg.get("prio_reserved_slots"), int):
+        PRIO_RESERVED_SLOTS = max(0, cfg["prio_reserved_slots"])
+    if PRIO_SCHED:
+        print(f"[strata] priority tiers on (T0 <= -20, T1 -19..-1: the solo path beside the slots; "
+              f"{PRIO_RESERVED_SLOTS} slot(s) reserved)", flush=True)
     if svc.request_log_dir:
         print(f"[strata] request logs: {svc.request_log_dir}", flush=True)
     if svc.api_monitor:
