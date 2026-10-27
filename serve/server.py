@@ -78,6 +78,8 @@ from serve.structured import StructuredOutputError, prepare_format, validated_js
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
+from serve import lifecycle_log  # noqa: E402
+from serve.session_request_id import session_header_fields, session_request_id  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -4284,12 +4286,18 @@ class Service:
             reading = self.status.get("busy") and self.status.get("first_token") is None
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
-    def begin_request(self, path, req):
-        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then)."""
+    def begin_request(self, path, req, headers=None):
+        """#332: a monitor record for this request, or None when neither the monitor nor the request logs are on.
+        session-tags (API-PARITY-PLAN 2): with X-Hermes-Session/-Client headers the id becomes
+        chatcmpl-<client>.<session>-m<n>-<hash6>-<rand4>; the thread-local copy lets the run path and the chat
+        response id use the same tag, and the sanitized header fields ride in the record (plan section 6)."""
+        tagged = session_request_id(headers, req) if headers is not None else None
+        self.request_trace.tagged_id = tagged
         if not self.api_monitor and not self.request_log_dir:
             return None
         raw = json.dumps(req, ensure_ascii=False, indent=2) if self.api_monitor else ""
-        record = {"id": uuid.uuid4().hex[:12], "path": path, "model": req.get("model") or self.model,
+        record = {"id": f"chatcmpl-{tagged}" if tagged else uuid.uuid4().hex[:12],
+                  "path": path, "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
@@ -4297,6 +4305,8 @@ class Service:
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
                   "_clock": time.perf_counter()}
+        if headers is not None:
+            record.update(session_header_fields(headers))
         if self.api_monitor:
             with self.status_lock:
                 self.api_requests.append(record)
@@ -4904,6 +4914,15 @@ class Service:
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
         request_id = uuid.uuid4().hex[:12]
+        # session-tags (API-PARITY-PLAN 2): the run's id is the thread-local tagged id when the
+        # handler read X-Hermes-Session/-Client headers, so /api/requests, the terminal events and
+        # the lifecycle lines all carry the same greppable tag; untagged (and a direct svc.run()
+        # without a handler) keeps the plain 12-hex. The handler's finally clears the thread-local,
+        # so every run of one API request (an MCP round) shares one tag and no later request
+        # inherits it.
+        tagged = getattr(self.request_trace, "tagged_id", None)
+        if tagged:
+            request_id = f"chatcmpl-{tagged}"
         setattr(cancel, "_strata_request_id", request_id)
         deadline = time.monotonic() + self.queue_timeout_s if self.queue_timeout_s is not None else None
         if deadline is not None:
@@ -4927,6 +4946,9 @@ class Service:
                                                     "queued_at": time.time(), "admitted_at": None,
                                                     "prompt_tokens": len(ids)}
             self._terminal_event_locked(request_id, "queued")
+            # lifecycle log (API-PARITY-PLAN 10): NEW REQUEST as the request enters the queue, like
+            # the vLLM API server prints it on arrival (serve/lifecycle_log.py)
+            lifecycle_log.log_new_request(request_id, len(ids))
         queued_counted = True
         try:
             # --batch: the engine runs several requests at once (StrataEngine.generate_batched orders them)
@@ -4964,6 +4986,15 @@ class Service:
                             queued_counted = False
                             self.terminal_requests[request_id].update(state="admitted", admitted_at=time.time())
                             self._terminal_event_locked(request_id, "admitted")
+                            # lifecycle log (API-PARITY-PLAN 10): ADMITTED at the queued -> admitted
+                            # transition. The cache split is the engine's held prefix (the prompt
+                            # tokens its session already holds -- no RESUME line has arrived yet);
+                            # no VRAM/RAM/Disk tiers, so no Disk segment (absent, not zero).
+                            held = getattr(self.engine, "held", None)
+                            held_n = min(len(ids), held[0]) if isinstance(held, tuple) and held[0] else 0
+                            lifecycle_log.log_admitted_request(
+                                request_id, len(ids), held_n,
+                                time.time() - self.terminal_requests[request_id]["queued_at"])
                     # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
                     # (parallel requests do not hold the fifo: one of them starts it, the others wait for that).
                     # #1603: a parallel request stays counted as queued until it is registered as running below -
@@ -5320,6 +5351,24 @@ class Service:
                                 hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                                   f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
+                            # lifecycle log (API-PARITY-PLAN 10): FINISHED at the terminal settlement,
+                            # from the engine's own figures (the DONE-line stats) and the terminal
+                            # row's own stamps -- errors/cancels skip it, as on vLLM. PP is the
+                            # engine's prompt-read time; its uncached count is what the DONE line
+                            # says was read (the held prefix the rest); TTFT is measured from
+                            # entering the engine queue, so WAIT + PP <= TTFT.
+                            if finish in ("stop", "length") and not timed_out and not cancel.is_set():
+                                pp_ms = float(last.get("prompt_ms") or 0.0)
+                                uncached = (int(last["prompt_read"]) if last.get("prompt_read") is not None
+                                            else max(0, len(ids) - int(last.get("reused") or 0)))
+                                trow = self.terminal_requests.get(request_id)
+                                wait_s = (trow["admitted_at"] - trow["queued_at"]
+                                          if trow and trow.get("admitted_at") else None)
+                                lifecycle_log.log_finished_request(
+                                    request_id, len(ids), uncached, pp_ms / 1000,
+                                    first_engine_token_s or 0.0, n,
+                                    float(last.get("decode_ms") or 0.0) / 1000,
+                                    queue_time=wait_s, e2e_time=el)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
@@ -5619,7 +5668,11 @@ def prompt_progress(svc: Service):
 def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None, force=None):
     """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
     an empty delta and a `strata_mcp` field, which only the web app reads.  `force`: see Service.run."""
-    cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
+    # session-tags (API-PARITY-PLAN 2): with the X-Hermes-* headers the response id carries the
+    # same tag as the internal request id, the /api/requests record and the lifecycle lines.
+    tagged = getattr(svc.request_trace, "tagged_id", None)
+    cid = f"chatcmpl-{tagged}" if tagged else "chatcmpl-" + uuid.uuid4().hex[:24]
+    created = int(time.time())
     model = svc.model_for(req)
     # llama.cpp's flag, and its default: a client that wants prompt progress asks for it, and nothing changes for one
     # that does not.  Strata already sends a keep-alive comment on every PP line, so this only fills that line in.
@@ -6596,11 +6649,13 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/choose", "/v1/completions"):
-                    self.record = svc.begin_request(path, req)
+                    # the Hermes session-tag headers are read here, before dispatch (plan section 2)
+                    self.record = svc.begin_request(path, req, self.headers)
                     if svc.request_log_dir and path != "/v1/choose" and self.record is not None:
                         try:
+                            tagged = self.record["id"] if self.record["id"].startswith("chatcmpl-") else None
                             self.record["_log"] = request_log.RequestLog(svc.request_log_dir, path, req, self.headers,
-                                                                         self.client_address[0])
+                                                                         self.client_address[0], tagged)
                         except Exception as e:                # logging must never fail a request
                             print(f"[strata] request log: {e}", flush=True)
                 if path == "/v1/responses":
@@ -6683,6 +6738,7 @@ def make_handler(svc: Service):
                 if self.cancel_event is not None:
                     with svc.status_lock:
                         svc.active_cancels.discard(self.cancel_event)
+                svc.request_trace.tagged_id = None       # session-tags: this thread's tag ends with the request
                 record = self.record
                 if record is not None:
                     with svc.status_lock:

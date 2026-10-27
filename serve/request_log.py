@@ -53,10 +53,13 @@ def render_transcript(messages) -> str:
 
 
 class RequestLog:
-    def __init__(self, directory: str, path: str, req: dict, headers, client: str | None):
+    def __init__(self, directory: str, path: str, req: dict, headers, client: str | None, request_id: str | None = None):
+        """`request_id`: the session-tagged id (chatcmpl-<client>.<session>-m<n>-...) when the request carried the
+        X-Hermes-* headers: the file is named by it, as the vLLM logs are."""
         global _open
         kind = {"/v1/chat/completions": "chatcmpl", "/v1/messages": "msg", "/v1/responses": "resp"}.get(path, "req")
-        self.request_id = f"{kind}-{uuid.uuid4().hex[:16]}"
+        self.request_id = re.sub(r"[^A-Za-z0-9.-]+", "_", request_id)[:96] if request_id else \
+            f"{kind}-{uuid.uuid4().hex[:16]}"
         messages = req.get("messages")
         if messages is None and isinstance(req.get("input"), list):   # /v1/responses
             messages = req.get("input")
