@@ -1039,6 +1039,11 @@ struct SlotLoan {
     int64_t keep = 0;           // the slots [0, keep) are never lent (experts only in VRAM, --vram-pin-gib)
     int64_t end = -1;           // the slots lent end below this one (-1: the cache's end; a batch slot's loan)
     std::vector<std::pair<int32_t, int32_t>> lent;   // (residency index, slot) while lent
+    /// The tier that moves experts into this cache's slots, or null: while the slots are lent, its empty ones in
+    /// them are out of its moves' reach (`lent_free`), and a slot whose expert it has meanwhile placed elsewhere
+    /// comes back to it empty, instead of the expert being put back and its other slot lost to the cache.
+    strata::core::AdaptiveTier* tier = nullptr;
+    std::vector<std::pair<int64_t, int32_t>> lent_free;   // (layer, slot): the tier's empty slots while lent
 
     int64_t top() const { return end >= 0 ? end : cache->slots(); }
     uint64_t offset(int64_t slot) const {
@@ -1066,17 +1071,28 @@ struct SlotLoan {
                 lent.emplace_back((int32_t) i, r[i]);
                 r[i] = strata::core::kNotResident;
             }
+        if (tier != nullptr) tier->take_free_slots(first, t, lent_free);
         if (d_res != nullptr) res_put(d_res, r);
+    }
+    /// The tier's empty slots back to it (after the borrower's last use).
+    void free_back() {
+        if (tier != nullptr)
+            for (const auto& [l, slot] : lent_free) tier->add_free(l, slot);
+        lent_free.clear();
     }
     /// After the borrower's last use: its GPU work is waited for first.
     bool give_back(strata::core::ExpertSource& src, int64_t n_expert, std::string& err) {
-        if (lent.empty()) return true;
+        if (lent.empty()) { free_back(); return true; }
         cudaSetDevice(device);
         cudaDeviceSynchronize();
         bool ok = true;
         const auto& lay = strata::kernels::cpu::expert_layout();
         for (const auto& [i, slot] : lent) {
             const int64_t l = i / n_expert;
+            if ((*res)[(size_t) i] >= 0) {   // resident elsewhere by now: the slot comes back empty
+                if (tier != nullptr) tier->add_free(l, slot);
+                continue;
+            }
             const uint8_t* b = src.blob(l, i % n_expert);
             if (b == nullptr || !cache->fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(l))) {
                 if (b == nullptr) err = "no arena blob for a lent slot";
@@ -1088,6 +1104,7 @@ struct SlotLoan {
         cudaSetDevice(main_device);
         if (ok && d_res != nullptr) res_put(d_res, *res);
         lent.clear();
+        free_back();
         return ok;
     }
 };
@@ -1115,11 +1132,12 @@ static void add_prompt_usage(std::vector<T>& usage, const std::vector<uint32_t>&
 /// holds or takes back; this loan's are added to it.
 static std::vector<std::array<int32_t, 3>> refill_plan(const SlotLoan& loan, const std::vector<uint32_t>* routed,
                                                        std::vector<uint8_t>& taken, int64_t n_expert,
-                                                       strata::core::ExpertSource& src) {
+                                                       strata::core::ExpertSource& src,
+                                                       std::vector<std::pair<int64_t, int32_t>>& empty) {
     std::vector<std::array<int32_t, 3>> out;
     std::vector<std::pair<int32_t, int32_t>> lent = loan.lent;   // (residency index, slot), by layer
     std::sort(lent.begin(), lent.end());
-    std::vector<std::pair<uint32_t, int32_t>> vict, cand;
+    std::vector<std::pair<int64_t, int32_t>> vict, cand;   // (routed, expert); -1: resident elsewhere by now
     for (size_t a = 0; a < lent.size();) {
         const int64_t l = lent[a].first / n_expert;
         size_t b = a;
@@ -1129,7 +1147,7 @@ static std::vector<std::array<int32_t, 3>> refill_plan(const SlotLoan& loan, con
         cand.clear();
         for (size_t i = a; i < b; ++i) {
             const int32_t e = (int32_t) (lent[i].first % n_expert);
-            vict.emplace_back(r ? r[e] : 0u, e);
+            vict.emplace_back((*loan.res)[(size_t) lent[i].first] >= 0 ? -1 : r ? (int64_t) r[e] : 0, e);
         }
         if (r != nullptr) {
             for (int32_t e = 0; e < (int32_t) n_expert; ++e) {
@@ -1137,7 +1155,7 @@ static std::vector<std::array<int32_t, 3>> refill_plan(const SlotLoan& loan, con
                 bool own = false;
                 for (size_t k = a; k < b && !own; ++k) own = lent[k].first == (int32_t) i;
                 if (!own && !taken[i] && (*loan.res)[i] < 0 && r[e] > 0 && src.in_ram(l, e))
-                    cand.emplace_back(r[e], e);
+                    cand.emplace_back((int64_t) r[e], e);
             }
             std::sort(vict.begin(), vict.end());
             std::sort(cand.begin(), cand.end(), std::greater<>());   // the most routed first
@@ -1145,6 +1163,7 @@ static std::vector<std::array<int32_t, 3>> refill_plan(const SlotLoan& loan, con
                 vict[k] = cand[k];
         }
         for (size_t k = 0; k < vict.size(); ++k) {
+            if (vict[k].first < 0) { empty.emplace_back(l, lent[a + k].second); continue; }
             out.push_back({(int32_t) l, vict[k].second, lent[a + k].second});
             taken[(size_t) (l * n_expert + vict[k].second)] = 1;
         }
@@ -1294,8 +1313,11 @@ struct PromptBuffers {
             cudaSetDevice(l->device);
             cudaDeviceSynchronize();   // the prompt path's last use of the slots
             cudaSetDevice(l->main_device);
-            const auto moves = refill_plan(*l, routed, taken, g->n_expert, src);
+            std::vector<std::pair<int64_t, int32_t>> empty;
+            const auto moves = refill_plan(*l, routed, taken, g->n_expert, src, empty);
             l->lent.clear();
+            for (const auto& [ly, slot] : empty) t->add_free(ly, slot);
+            l->free_back();
             if (!t->refill(moves, l == &loan ? (64ull << 20) : (256ull << 20), err)) return false;
         }
         return true;
@@ -3705,6 +3727,7 @@ int main(int argc, char** argv) {
             pbuf.loan.d_res = d_res;
             pbuf.loan.device = pbuf.loan.main_device = o.main_gpu;
             pbuf.loan.keep = (int64_t) pin1.size();
+            if (tier.on()) pbuf.loan.tier = &tier;
         }
         if (off) {
             pbuf.loan2.cache = &gpu2.cache();
@@ -3712,6 +3735,7 @@ int main(int argc, char** argv) {
             pbuf.loan2.device = o.second_gpu;
             pbuf.loan2.main_device = o.main_gpu;
             pbuf.loan2.keep = (int64_t) pin2.size();
+            if (tier2.on()) pbuf.loan2.tier = &tier2;
         }
         if (!pbuf.init(o.prefill_chunk, !o.no_prefill_borrow, e)) return false;
         if (pin1.empty() && pin2.empty()) return true;
@@ -4885,6 +4909,8 @@ int main(int argc, char** argv) {
                     l.device = dev;
                     l.main_device = o.main_gpu;
                     l.keep = keep;
+                    strata::core::AdaptiveTier* const t = main_gpu ? &tier : &tier2;
+                    if (t->on()) l.tier = t;
                     int64_t s0 = whole.first;
                     while (s0 < end && l.offset(s0 + 1) <= b_off - 1) ++s0;
                     l.end = s0 + 1;
@@ -5800,6 +5826,23 @@ int main(int argc, char** argv) {
                         prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) reuse, (long long) (hits1 - hits0), (long long) (look1 - look0));
             std::fflush(stdout);
+            // the residency census: the slots each GPU's table points at (two experts in one slot: "shared"), against
+            // its slots; a slot no expert points at that no loan or K/V holds is lost to the cache until a restart
+            if (std::getenv("STRATA_RES_CENSUS") != nullptr) {
+                auto census = [](const std::vector<int32_t>& r, int64_t slots, int64_t& used, int64_t& shared) {
+                    std::vector<uint8_t> seen((size_t) std::max<int64_t>(slots, 0), 0);
+                    used = shared = 0;
+                    for (int32_t s : r)
+                        if (s >= 0 && s < slots) { if (seen[(size_t) s]++) ++shared; else ++used; }
+                };
+                int64_t u1 = 0, d1 = 0, u2 = 0, d2 = 0;
+                census(host_res, xcache.slots(), u1, d1);
+                if (!host_res2.empty()) census(host_res2, gpu2.cache().slots(), u2, d2);
+                std::fprintf(stderr, "strata serve: residency: main %lld of %lld slots (%lld shared), second %lld of "
+                                     "%lld (%lld shared); K/V holds %lld\n", (long long) u1, (long long) xcache.slots(),
+                             (long long) d1, (long long) u2, (long long) (host_res2.empty() ? 0 : gpu2.cache().slots()),
+                             (long long) d2, (long long) (kvg.on ? kvg.top - kvg.lo : 0));
+            }
             // batch slots lend cache slots while they run (their pages grow): no move of the split's tiers may be left
             // queued for one of them
             if (split_ev1 != nullptr && !slots.empty()) {

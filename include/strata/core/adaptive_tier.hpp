@@ -50,6 +50,19 @@ public:
             for (size_t i = 0; i < f.size();)
                 if (f[i] >= lo && f[i] < hi) { f[i] = f.back(); f.pop_back(); } else ++i;
     }
+    /// A loan took the slots [lo, hi): the empty ones among them out of the moves' reach, as (layer, slot), for the
+    /// loan to hand back with add_free when it ends.
+    void take_free_slots(int64_t lo, int64_t hi, std::vector<std::pair<int64_t, int32_t>>& out) {
+        for (size_t l = 0; l < free_.size(); ++l)
+            for (size_t i = 0; i < free_[l].size();)
+                if (free_[l][i] >= lo && free_[l][i] < hi) {
+                    out.emplace_back((int64_t) l, free_[l][i]);
+                    free_[l][i] = free_[l].back();
+                    free_[l].pop_back();
+                } else {
+                    ++i;
+                }
+    }
     int64_t free_slots() const;
     /// The slots [0, n) hold experts that live only in VRAM (--vram-pin-gib): never evicted.  And an expert the RAM
     /// does not hold is never a candidate (its copy would have no source; it lives in another GPU's frozen slots).
