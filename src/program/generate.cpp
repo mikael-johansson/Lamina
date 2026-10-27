@@ -5083,7 +5083,10 @@ int main(int argc, char** argv) {
             }
             // an admission reads its prompt beside the slots' windows (the residency lock keeps them apart where they
             // meet); a solo request while slots decode has the GPUs to itself
-            if (admit < 0 || !ple_table2.is_open()) {   // (one n-gram table: the slots' windows wait for it too)
+            // pause=1 on an admission (a voice decision: a few dozen tokens, priority -20): the slots wait for its
+            // read too - beside two decoding slots its windows queued behind theirs (0.9-1.6 s for 30 tokens, ~0.1 idle)
+            const bool admit_pause = admit >= 0 && line.find(" pause=1 ") != std::string::npos;
+            if (admit < 0 || !ple_table2.is_open() || admit_pause) {   // (one n-gram table: the slots' windows wait for it too)
                 bool busy = false;
                 for (auto& b : slots) busy = busy || b->active.load();
                 if (busy) pause_slots();

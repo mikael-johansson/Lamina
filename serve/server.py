@@ -1813,6 +1813,7 @@ class StrataEngine:
 
     VOICE_STOP_MIN = 4096   # a read with fewer tokens left than this ends before a STOP would gain anything
     VOICE_STOP = True       # "prio_voice_stop": false turns the STOP give-way off (an engine hang after one, 10:49 live)
+    VOICE_PAUSE = True      # "prio_voice_pause": a T0 admission pauses the slots for its (short) read
     VOICE_CHUNK = 4096      # a read that gave way goes on in chunks this small ("prio_voice_chunk"; 0: as configured):
                             # a STOP waits for the chunk in flight through both stages of the split (~2 chunk-times)
 
@@ -2038,7 +2039,9 @@ class StrataEngine:
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
-                    head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
+                    # a voice decision (T0) admission: the slots pause for its short read ("prio_voice_pause")
+                    pause = " pause=1" if PRIO_SCHED and tier == 0 and self.VOICE_PAUSE and not embeddings else ""
+                    head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}{pause}"
                     live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
                             "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
                             "started": time.time(), "first_token": None}
@@ -2061,10 +2064,12 @@ class StrataEngine:
 
                     def ask():        # as give_way above, for the slot this admission reads into
                         nonlocal asked, voice_stop
-                        if (self.VOICE_STOP and not asked and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                        # (not gated on `asked`: #656's BYIELD to a shorter agent turn, which this engine ignores, set it
+                        # first and kept the voice STOP from ever going out - a decision waited 40 s behind a 182K read)
+                        if (self.VOICE_STOP and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")           # (this engine ignores BYIELD: see voice_stop)
-                            voice_stop = asked = True
+                            voice_stop = True
                             return
                         if (not asked and not embeddings and
                                 ((yields < self.YIELDS_MAX and self._shorter_waiting(len(prompt))) or
@@ -8497,6 +8502,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         PRIO_RESERVED_SLOTS = max(0, cfg["prio_reserved_slots"])
     if cfg.get("prio_voice_stop") is False:
         StrataEngine.VOICE_STOP = False
+    if cfg.get("prio_voice_pause") is False:
+        StrataEngine.VOICE_PAUSE = False
     if isinstance(cfg.get("prio_voice_chunk"), int) and not isinstance(cfg.get("prio_voice_chunk"), bool):
         StrataEngine.VOICE_CHUNK = max(0, cfg["prio_voice_chunk"])
     if "PRIO_SOLO_MAX_TIER" not in os.environ and isinstance(cfg.get("prio_solo_max_tier"), int):
