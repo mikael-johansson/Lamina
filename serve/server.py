@@ -71,6 +71,7 @@ from serve import ready as ready_file  # noqa: E402
 from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
+from serve import completions as completions_api  # noqa: E402
 from serve import lifeline  # noqa: E402
 from serve import request_log  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
@@ -1503,6 +1504,8 @@ class StrataEngine:
                 f = line.split()
                 if len(f) >= 3 and f[1].lstrip("-").isdigit() and f[2].isdigit():
                     self._yielded = (int(f[1]), int(f[2]))
+            elif self._note_line(line):                  # LP (score=: /v1/choose, /v1/completions decisions), TIERS:
+                pass                                     # kept for this request's DONE figures, as on the solo path
             elif line.startswith("ERR"):
                 self._ctl_erred = True                   # #1059: the engine refused it and is idle: no DONE follows
                 raise ValueError(line[4:].strip())
@@ -1761,6 +1764,7 @@ class StrataEngine:
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
+        self._pending = {}                              # (no LP / TIERS line of an earlier request that never got its DONE)
         btrace("ctl acquired")
         slot, gen0, reserved = None, None, None
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
@@ -6421,7 +6425,7 @@ def make_handler(svc: Service):
                 return
             reserved = False
             try:
-                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/completions"):
                     reserved = svc.reserve_inference()
                     if reserved is None:
                         error = {"type": "server_error", "code": "server_draining",
@@ -6481,7 +6485,7 @@ def make_handler(svc: Service):
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
-                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/choose"):
+                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/choose", "/v1/completions"):
                     self.record = svc.begin_request(path, req)
                     if svc.request_log_dir and path != "/v1/choose" and self.record is not None:
                         try:
@@ -6508,6 +6512,8 @@ def make_handler(svc: Service):
                     self._count_tokens(req)
                 elif path == "/v1/choose":
                     self._choose(req)
+                elif path == "/v1/completions":
+                    self._completions(req)
                 elif path == "/v1/images/generations":
                     self._images(req)
                 else:
@@ -6824,6 +6830,27 @@ def make_handler(svc: Service):
                     yield item
             finally:
                 items.close()
+
+        def _completions(self, req):
+            """POST /v1/completions (serve/completions.py): a raw prompt, vLLM's shape."""
+            svc.load()
+            p = completions_api.parse(req, svc.tok, len(getattr(svc.tok, "tokens", ())) or None, svc.engine.max_context)
+            cancel = threading.Event()
+            self._watch_client(cancel)
+            chunks = completions_api.responses(svc, p, cancel, QUEUE_BEAT_S, svc.model)
+            if not p["stream"]:
+                for c in chunks:
+                    if c is not None:
+                        return self._json(200, c)
+                return
+            self._sse()
+            try:
+                for c in chunks:
+                    self.wfile.write(completions_api.sse(c))
+                    self.wfile.flush()
+                self.wfile.write(b"data: [DONE]\n\n")
+            except OSError:
+                self._note(outcome="disconnected")
 
         def _choose(self, req):
             self._no_local_images(openai_to_messages(req)[0])

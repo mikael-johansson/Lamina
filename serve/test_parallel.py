@@ -145,6 +145,9 @@ while True:
             nf_slots.add(slot)
         toks = reply(ids)
         stop.clear()
+        # score=ID:ID (POST /v1/choose, /v1/completions decisions): the LP line after the prompt, before the first T
+        score = [x[6:].split(":") for x in f if x.startswith("score=")]
+        score_line = "LP " + " ".join(f"{t}:{-0.5 - k:.6g}" for k, t in enumerate(score[0])) if score else None
         # the prompt read: CH tokens a chunk, a PP line each; a BYIELD <s> gives way at a chunk boundary
         given = None
         for q in range(CH, len(ids) - 1, CH):
@@ -184,6 +187,8 @@ while True:
             continue
         n = 1 if slot is not None else max_new
         out = 0
+        if score_line:
+            print(score_line, flush=True)
         for t in toks[:n]:
             if stop.is_set():
                 break
@@ -743,6 +748,49 @@ class ParallelService(unittest.TestCase):
             c = json.loads(r.read().decode())["choices"][0]
         self.assertEqual((c["message"]["content"], c["finish_reason"]), ("ok, ", "stop"))
         self.assertEqual(self.chat("again")["choices"][0]["message"]["content"], "ok, done.")
+
+    def post(self, path, body, timeout=60):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+
+    def test_scores_alone_and_beside_a_running_request(self):
+        """The engine's LP line (score=) reaches /v1/choose and a /v1/completions decision in --batch mode: alone
+        (the solo GEN) and while another request decodes (a BGEN admission); the request's priority is accepted."""
+        self.start(2)
+        decision = {"prompt": list(b"hello"), "max_tokens": 1, "allowed_token_ids": [ord("A"), ord("B")],
+                    "logprobs": 2, "return_tokens_as_token_ids": True, "priority": -20}
+
+        def check():
+            c = self.post("/v1/choose", {"messages": [{"role": "user", "content": "A or B?"}], "options": ["A", "B"]})
+            self.assertEqual(c["choice"], "A")
+            self.assertAlmostEqual(c["logprobs"]["B"] - c["logprobs"]["A"], -1.0, places=5)
+            d = self.post("/v1/completions", decision)
+            self.assertEqual(d["choices"][0]["text"], "A")
+            self.assertEqual(d["choices"][0]["logprobs"]["tokens"], [f"token_id:{ord('A')}"])
+        check()
+        out = {}
+        long_one = threading.Thread(target=lambda: out.update(r=self.chat("go on LONGREPLY", max_tokens=64)))
+        long_one.start()
+        time.sleep(0.1)
+        check()
+        long_one.join(30)
+        self.assertEqual(out["r"]["choices"][0]["message"]["content"], "ok, " + "la " * 15 + "done.")
+        self.assertIn("BGEN", self.log.read_text())     # (a decision went through an admission)
+
+    def test_completions_stream_in_a_batch_slot(self):
+        """A streamed /v1/completions reply in --batch mode stops at its stop id (not in the text), as vLLM."""
+        self.start(2)
+        body = {"prompt": list(b"hi"), "max_tokens": 32, "stop_token_ids": [ord(",")], "stream": True,
+                "priority": -10}
+        req = urllib.request.Request(self.base + "/v1/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            ev = [json.loads(x[6:]) for x in r.read().decode().splitlines()
+                  if x.startswith("data: ") and x != "data: [DONE]"]
+        self.assertEqual("".join(c["choices"][0]["text"] for c in ev), "ok")
+        self.assertEqual((ev[-1]["choices"][0]["finish_reason"], ev[-1]["choices"][0]["stop_reason"]), ("stop", ord(",")))
 
     def test_engine_turns_batching_off(self):
         self.start(4, fit=0)
