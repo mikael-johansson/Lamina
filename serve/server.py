@@ -1813,6 +1813,8 @@ class StrataEngine:
 
     VOICE_STOP_MIN = 4096   # a read with fewer tokens left than this ends before a STOP would gain anything
     VOICE_STOP = True       # "prio_voice_stop": false turns the STOP give-way off (an engine hang after one, 10:49 live)
+    VOICE_CHUNK = 4096      # a read that gave way goes on in chunks this small ("prio_voice_chunk"; 0: as configured):
+                            # a STOP waits for the chunk in flight through both stages of the split (~2 chunk-times)
 
     def _read_left(self) -> int:
         """The prompt tokens the read on the control lines has left (from its PP lines; unknown: a lot)."""
@@ -1951,6 +1953,8 @@ class StrataEngine:
                         # ones first: the tiers), then this one is sent again and reads on from the prompt cache
                         voice_stop = False
                         carry_leg(carry, self.last)
+                        if self.VOICE_CHUNK and " chunk=" not in keys:
+                            keys += f" chunk={self.VOICE_CHUNK}"
                         self.ctl.release()
                         holding = False
                         with self.slot_cv:
@@ -2160,6 +2164,8 @@ class StrataEngine:
                         # prompt cache)
                         voice_stop = False
                         carry_leg(carry, self.last)
+                        if self.VOICE_CHUNK and " chunk=" not in keys:
+                            keys += f" chunk={self.VOICE_CHUNK}"
                         self.slot_live[slot] = None
                         self.slot_held[slot] = []
                         with self.slot_cv:
@@ -8491,6 +8497,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         PRIO_RESERVED_SLOTS = max(0, cfg["prio_reserved_slots"])
     if cfg.get("prio_voice_stop") is False:
         StrataEngine.VOICE_STOP = False
+    if isinstance(cfg.get("prio_voice_chunk"), int) and not isinstance(cfg.get("prio_voice_chunk"), bool):
+        StrataEngine.VOICE_CHUNK = max(0, cfg["prio_voice_chunk"])
     if "PRIO_SOLO_MAX_TIER" not in os.environ and isinstance(cfg.get("prio_solo_max_tier"), int):
         PRIO_SOLO_MAX_TIER = cfg["prio_solo_max_tier"]
     if PRIO_SCHED:

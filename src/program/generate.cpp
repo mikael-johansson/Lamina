@@ -5111,6 +5111,9 @@ int main(int argc, char** argv) {
             // roll=N: the first N prompt tokens are the client's growing context and the rest a throw-away probe (a voice
             // decision): a rolling checkpoint at N (PromptCache::checkpoint), none after it.  ckpt=0: no checkpoint
             int64_t req_roll = 0, req_ckpt_max = INT64_MAX;
+            // chunk=N: this request's prompt chunks at most N tokens (a read a voice request makes give way: a STOP
+            // takes effect once the chunk in flight is through both stages of the split, ~2 chunk-times)
+            int64_t req_chunk = 0;
             // img_keys=<hex>,<hex>,...: each picture's key from the server (its normalized bytes' hash), in prompt
             // order; the conversation cache then matches a picture by key and grid, not by its embedding floats
             std::vector<uint64_t> req_img_keys;
@@ -5136,6 +5139,7 @@ int main(int argc, char** argv) {
                     else if (key == "penalty_present") req_penalty_present = fv;
                     else if (key == "seed") req_seed = std::strtoull(v, nullptr, 10);
                     else if (key == "roll") req_roll = std::max<long long>(0, std::atoll(v));
+                    else if (key == "chunk") req_chunk = std::max<long long>(0, std::atoll(v));
                     else if (key == "ckpt" && std::atoi(v) == 0) req_ckpt_max = 0;
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "img_keys") {
@@ -5444,8 +5448,9 @@ int main(int argc, char** argv) {
                 tier2.apply_pending(true);
                 // --prompt-split: a prompt of more than one chunk, when the second GPU can lend the split's bytes.
                 // The checkpoints every --cache-every cells fall at the chunks' ends.
-                const int64_t chunk = prompt_chunk(batched_end - reuse, o.prefill_chunk, pbuf.offload != nullptr);
-                const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * chunk;
+                const int64_t cap = req_chunk >= 1024 ? std::min<int64_t>(o.prefill_chunk, req_chunk) : o.prefill_chunk;
+                const int64_t chunk = prompt_chunk(batched_end - reuse, cap, pbuf.offload != nullptr);
+                const int64_t step = std::max<int64_t>(1, o.cache_every / cap) * chunk;
                 // (--decode-split: every prompt, the layers from the split on hold their state on the second GPU)
                 const bool split_try = pbuf.split != nullptr && (batched_end - reuse > o.prefill_chunk || o.decode_split > 0);
                 {
