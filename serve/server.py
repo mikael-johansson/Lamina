@@ -5335,8 +5335,16 @@ class Service:
                             t["drafts_offered"] += last.get("drafts_offered") or 0
                             t["drafts_accepted"] += last.get("drafts_accepted") or 0
                             ft0 = st.get("first_token")             # this request's own (#465: one per request)
+                            # the vLLM-named stage splits (API-PARITY-PLAN 9): the queue wait from the terminal row's
+                            # own stamps (this block already holds status_lock), the prefill from the engine's own
+                            # prompt-read time (request_stats)
+                            trow = self.terminal_requests.get(request_id)
+                            queue_s = (round(trow["admitted_at"] - trow["queued_at"], 3)
+                                       if trow and trow.get("admitted_at") and trow.get("queued_at") else None)
                             self.latencies.observe(ft0 - started if ft0 else None, n,
-                                                   (last.get("decode_ms") or 0.0) / 1000, time.time() - started)
+                                                   (last.get("decode_ms") or 0.0) / 1000, time.time() - started,
+                                                   queue_s=queue_s,
+                                                   prefill_s=(last.get("prompt_ms") or 0.0) / 1000 or None)
                             fresh = getattr(self.engine, "last", None)
                             if fresh is not None and fresh is not before:      # the engine's clock for THIS request
                                 timings = request_timings(seen, n, last)
@@ -6537,6 +6545,11 @@ def make_handler(svc: Service):
             elif path == "/v1/status":
                 if self._authorized():
                     self._json(200, svc.v1_status())
+            elif path == "/v1/prefill_progress" and os.environ.get("PREFILL_PROGRESS") == "1":
+                # the vLLM fork's prefill-progress contract (PREFILL_PROGRESS=1 gates the route, as there; API-PARITY-PLAN 3)
+                if self._authorized():
+                    from serve import prefill_progress
+                    self._json(200, prefill_progress.payload(svc))
             else:
                 self._json(404, {"error": {"message": "not found"}})
 
