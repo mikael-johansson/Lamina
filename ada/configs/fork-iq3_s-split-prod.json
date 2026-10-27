@@ -81,5 +81,5 @@
  "request_log_dir": "/d/hdd_800/logs/strata-requests",
  "priority_sched": true,
  "prio_reserved_slots": 0,
- "prio_solo_max_tier": 1
+ "prio_solo_max_tier": -1
 }

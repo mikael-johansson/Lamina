@@ -470,6 +470,42 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(out["voice"]["usage"]["completion_tokens"], 1)
         self.assertRegex(self.log.read_text(), r"(?m)^GEN None \d+ [12]$")    # solo, beside an active slot
 
+    def test_long_read_gives_way_to_a_voice_request(self):
+        """PRIORITY_SCHED: the engine reads a prompt through (no BYIELD), so a long read that a voice request waits for
+        is STOPped at its next chunk; the voice request goes first (here through a slot: PRIO_SOLO_MAX_TIER -1), and the
+        read is sent again and answered as usual."""
+        self.start(2)
+        self.engine.VOICE_STOP_MIN = 0
+        import serve.server as server
+        out, done_at = {}, {}
+        def go(k, text, max_tokens, priority=None):
+            body = {"messages": [{"role": "user", "content": text}], "max_tokens": max_tokens, "reasoning_effort": "none"}
+            if priority is not None:
+                body["priority"] = priority
+            req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                out[k] = json.loads(r.read().decode())
+            done_at[k] = time.monotonic()
+        long_text = "a long agent context " * 150
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(server, "PRIO_SOLO_MAX_TIER", -1):
+            agent = threading.Thread(target=go, args=("agent", long_text, 16))
+            agent.start()
+            time.sleep(0.3)                     # well inside its read (~1 s here)
+            t0 = time.monotonic()
+            go("voice", "yes or no", 1, priority=-20)
+            voice_s = time.monotonic() - t0
+            agent.join(30)
+        self.assertLess(done_at["voice"], done_at["agent"])
+        self.assertLess(voice_s, 0.6)
+        self.assertEqual(out["agent"]["choices"][0]["message"]["content"], "ok, done.")
+        log = self.log.read_text().splitlines()
+        heads = [l.split()[0] for l in log]
+        self.assertEqual(heads.count("GEN"), 2, log)          # the read, then the read again after the voice request
+        self.assertLess(heads.index("BGEN"), len(heads) - 1 - heads[::-1].index("GEN"), log)
+        time.sleep(0.3)
+        self.assertEqual(self.engine.slot_busy, [False, False])
+
     def test_engine_reports_fewer_slots(self):
         self.start(4, fit=2)
         self.assertEqual(self.engine.batch, 2)

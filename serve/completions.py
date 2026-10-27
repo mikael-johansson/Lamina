@@ -27,6 +27,8 @@ import math
 import time
 import uuid
 
+from serve import lifecycle_log
+
 FORWARD = ("temperature", "top_p", "top_k", "min_p", "seed", "presence_penalty", "frequency_penalty",
            "repetition_penalty")
 
@@ -118,12 +120,18 @@ def run(svc, p: dict, cancel, beat_s: float):
         eng = svc.engine
         stops = p["stop_ids"] | set(getattr(svc, "stop_ids", ()) or ())
         n, finish, stop_reason = 0, "length", None
+        # the lifecycle lines (serve/lifecycle_log.py) the chat routes print from Service.run, which this route skips
+        rid = "cmpl-" + uuid.uuid4().hex[:12]
+        t0, t_first = time.monotonic(), None
+        lifecycle_log.log_new_request(rid, len(p["ids"]))
         gen = eng.generate(p["ids"], p["max_new"], p["sampling"], cancel)
         try:
             for t in gen:
                 if t is None:
                     yield "ping", None
                     continue
+                if t_first is None:
+                    t_first = time.monotonic()
                 n += 1
                 if t in stops:                            # as vLLM: the stop token ends the text, it is not in it
                     finish, stop_reason = "stop", t
@@ -134,6 +142,16 @@ def run(svc, p: dict, cancel, beat_s: float):
         last = dict(getattr(eng, "last", None) or {})
         if cancel.is_set() and n == 0:
             raise QueueCancelled("the client disconnected")
+        try:
+            pp_s = float(last.get("prompt_ms") or 0.0) / 1000
+            uncached = (int(last["prompt_read"]) if last.get("prompt_read") is not None
+                        else max(0, len(p["ids"]) - int(last.get("reused") or 0)))
+            ttft = (t_first - t0) if t_first is not None else time.monotonic() - t0
+            lifecycle_log.log_finished_request(rid, len(p["ids"]), uncached, pp_s, ttft, n,
+                                               float(last.get("decode_ms") or 0.0) / 1000,
+                                               queue_time=max(0.0, ttft - pp_s), e2e_time=time.monotonic() - t0)
+        except Exception:                                 # a log line must never fail the request
+            pass
         yield "done", {"finish": finish, "stop_reason": stop_reason, "completion_tokens": n,
                        "prompt_tokens": len(p["ids"]), "cached": min(int(last.get("reused") or 0), len(p["ids"])),
                        "scores": last.get("scores") or {}}

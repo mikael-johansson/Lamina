@@ -1811,6 +1811,13 @@ class StrataEngine:
         with self.slot_cv:
             return any(e[0] * 2 <= plen for e in self.wait_lens)
 
+    VOICE_STOP_MIN = 4096   # a read with fewer tokens left than this ends before a STOP would gain anything
+
+    def _read_left(self) -> int:
+        """The prompt tokens the read on the control lines has left (from its PP lines; unknown: a lot)."""
+        p = self.progress
+        return max(0, p[1] - p[0]) if p else 1 << 30
+
     def _voice_waiting(self, tier: int) -> bool:
         """PRIORITY_SCHED: a voice request (T0/T1) of a higher tier than `tier` waits for the control lines.  A prompt
         read gives way to it at its next chunk however often it has given way and however long the waiting prompt is
@@ -1839,6 +1846,10 @@ class StrataEngine:
         prio = read_priority((sampling or {}).get("priority"))
         tier = prio_tier(prio)
         voice = PRIO_SCHED and tier <= PRIO_SOLO_MAX_TIER and not embeddings
+        # PRIORITY_SCHED: this engine reads a prompt through (it ignores BYIELD), so a read that a voice request waits
+        # for is STOPped at its next chunk: the part read stays in the prompt cache, the voice requests take the control
+        # lines, and the read is sent again and goes on from the cache (#656's give-way, as this engine can do it)
+        voice_stop = False
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
@@ -1891,7 +1902,14 @@ class StrataEngine:
                             return self.waiting > 0
 
                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
-                        nonlocal reserved
+                        nonlocal reserved, voice_stop
+                        if (not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                                self._read_left() >= self.VOICE_STOP_MIN):
+                            self._send("STOP")
+                            voice_stop = True
+                            return
+                        if voice_stop:
+                            return
                         if (reserved is None and not out and not embeddings and
                                 ((yields < self.YIELDS_MAX and self._shorter_waiting(len(prompt))) or
                                  self._voice_waiting(tier))):
@@ -1924,8 +1942,24 @@ class StrataEngine:
                         with self.slot_cv:
                             self.slot_busy[reserved] = False
                             self.slot_claims.discard(reserved)
+                            self.slot_tier.pop(reserved, None)
                             self.slot_cv.notify_all()
                         reserved = None
+                    if voice_stop and not out and not cancel.is_set():
+                        # it gave way to a voice request: the control lines go to the requests waiting now (the voice
+                        # ones first: the tiers), then this one is sent again and reads on from the prompt cache
+                        voice_stop = False
+                        carry_leg(carry, self.last)
+                        self.ctl.release()
+                        holding = False
+                        with self.slot_cv:
+                            epoch = self.ctl_epoch
+                        btrace("gave way to a voice request")
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        if not ok:
+                            return
+                        holding, born = True, self.gen
+                        continue
                     if slot is None:
                         finish = (self.last or {}).get("finish") if isinstance(self.last, dict) else None
                         left = int(max_new) - len(out)
@@ -2021,7 +2055,12 @@ class StrataEngine:
                     asked = False
 
                     def ask():        # as give_way above, for the slot this admission reads into
-                        nonlocal asked
+                        nonlocal asked, voice_stop
+                        if (not asked and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                                self._read_left() >= self.VOICE_STOP_MIN):
+                            self._send("STOP")           # (this engine ignores BYIELD: see voice_stop)
+                            voice_stop = asked = True
+                            return
                         if (not asked and not embeddings and
                                 ((yields < self.YIELDS_MAX and self._shorter_waiting(len(prompt))) or
                                  self._voice_waiting(tier))):
@@ -2114,6 +2153,30 @@ class StrataEngine:
                         raise EngineNonFinite("the engine's logits became non-finite (#879)")
                     if not cont and self._yielded is not None and self._yielded[0] == slot and not cancel.is_set():
                         continue                            # gave way: again once the shorter request is in
+                    if not cont and voice_stop and not out and not cancel.is_set():
+                        # STOPped for a voice request (see voice_stop): the slot is free again, the voice requests
+                        # take the control lines, and this admission is sent again from the top (its part read in the
+                        # prompt cache)
+                        voice_stop = False
+                        carry_leg(carry, self.last)
+                        self.slot_live[slot] = None
+                        self.slot_held[slot] = []
+                        with self.slot_cv:
+                            self.slot_busy[slot] = False
+                            self.slot_claims.discard(slot)
+                            self.slot_tier.pop(slot, None)
+                            self.slot_cv.notify_all()
+                        slot, phase = None, "none"
+                        self.ctl.release()
+                        holding = False
+                        with self.slot_cv:
+                            epoch = self.ctl_epoch
+                        btrace("admission gave way to a voice request")
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        if not ok:
+                            return
+                        holding, born = True, self.gen
+                        wait_top = True
                     break
                 if wait_top:
                     wait_top = False
