@@ -5081,6 +5081,9 @@ int main(int argc, char** argv) {
             int req_penalty_last_n = 0;
             double req_spec_min_p = o.spec_min_p;
             std::vector<int32_t> req_score;   // score=ID:ID:...: see the first window
+            // roll=N: the first N prompt tokens are the client's growing context and the rest a throw-away probe (a voice
+            // decision): a rolling checkpoint at N (PromptCache::checkpoint), none after it.  ckpt=0: no checkpoint
+            int64_t req_roll = 0, req_ckpt_max = INT64_MAX;
             // img_keys=<hex>,<hex>,...: each picture's key from the server (its normalized bytes' hash), in prompt
             // order; the conversation cache then matches a picture by key and grid, not by its embedding floats
             std::vector<uint64_t> req_img_keys;
@@ -5105,6 +5108,8 @@ int main(int argc, char** argv) {
                     else if (key == "penalty_freq") req_penalty_freq = fv;
                     else if (key == "penalty_present") req_penalty_present = fv;
                     else if (key == "seed") req_seed = std::strtoull(v, nullptr, 10);
+                    else if (key == "roll") req_roll = std::max<long long>(0, std::atoll(v));
+                    else if (key == "ckpt" && std::atoi(v) == 0) req_ckpt_max = 0;
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "img_keys") {
                         req_img_keys.clear();
@@ -5388,7 +5393,14 @@ int main(int argc, char** argv) {
             if (!geni) prev_prompt.assign(ids.begin(), ids.end());
             const int64_t cut1 = std::min(fork > 0 ? fork : INT64_MAX, msg_end > 0 ? msg_end : INT64_MAX);
             const int64_t cut2 = std::max(fork, msg_end) > cut1 ? std::max(fork, msg_end) : 0;
-            const int64_t cuts[2] = {cut1 == INT64_MAX ? 0 : cut1, cut2};   // ascending, 0 = none
+            // roll=N: a cut of its own (the batched path and the verify windows checkpoint there), and none after it
+            const int64_t roll = track && req_roll > reuse && req_roll < n - 1 ? req_roll : 0;
+            if (req_roll > 0) req_ckpt_max = std::min(req_ckpt_max, req_roll);
+            int64_t cuts[3] = {cut1 == INT64_MAX ? 0 : cut1, cut2, roll};   // ascending, 0 = none
+            std::sort(cuts, cuts + 3);
+            auto ckpt = [&](int64_t pos) {
+                if (pos <= req_ckpt_max) pcache.checkpoint(pos, pos == roll);
+            };
             int64_t batched_end = reuse;   // [reuse, batched_end) through the batched prompt path
             if (geni) batched_end = n - 1;   // image rows reach the batched path only
             else if (n - 1 - reuse > o.feed_max) batched_end = (q > reuse && n - 1 - q <= o.feed_max) ? q : n - 1;
@@ -5444,7 +5456,7 @@ int main(int argc, char** argv) {
                     }
                     if (track) {
                         pcache.set(a0, ids.data() + a0, b0 - a0);
-                        pcache.checkpoint(b0);
+                        ckpt(b0);
                     }
                     if (split_on) psplit.ran(b0);
                     a0 = b0;
@@ -5517,7 +5529,7 @@ int main(int argc, char** argv) {
                         if (track && c > from && c < to) {
                             if (!feed(from, c)) return false;
                             if (poison_at >= 0) return true;
-                            pcache.checkpoint(c);
+                            ckpt(c);
                             from = c;
                         }
                     return feed(from, to);
@@ -5536,10 +5548,10 @@ int main(int argc, char** argv) {
                 }
                 if (!feed_to(batched_end, split)) { report(err); return 1; }
                 if (split > batched_end) pp_line(split);
-                if (track && split == q && poison_at < 0) pcache.checkpoint(q);
+                if (track && split == q && poison_at < 0) ckpt(q);
                 if (poison_at < 0 && !feed_to(split, merge_from)) { report(err); return 1; }
                 if (merge_from > split) pp_line(merge_from);
-                if (track && poison_at < 0) pcache.checkpoint(merge_from);
+                if (track && poison_at < 0) ckpt(merge_from);
             }
             pp_total = 0;
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();

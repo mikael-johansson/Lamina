@@ -133,6 +133,22 @@ class Completions(unittest.TestCase):
         for body in ({"prompt": [300]}, {"prompt": [1], "stop_token_ids": [300]}):
             self.assertRaises(ValueError, completions.parse, body, self.tok, 300, 4096)
 
+    def test_cache_prefix_is_a_rolling_checkpoint_for_the_engine(self):
+        """"strata_cache_prefix": N reaches the engine as `roll=N` (a decision's context, its probe after it), also
+        beside a decision's scores; a value outside the prompt is a 400."""
+        s, b = self.post({"prompt": [1, 2, 3, 4], "max_tokens": 1, "allowed_token_ids": [A, B],
+                          "strata_cache_prefix": 2, "strata_checkpoint": False})
+        self.assertEqual(s, 200, b)
+        sampling = self.engine.calls[-1][2]
+        self.assertEqual((sampling.get("strata_cache_prefix"), sampling.get("score")), (2, [A, B]))
+        from serve.server import StrataEngine
+        keys = StrataEngine.sampling_keys(sampling)
+        self.assertIn(" roll=2", keys)
+        self.assertIn(" ckpt=0", keys)
+        for cp in (0, 4, -1, True, "2"):
+            s, b = self.post({"prompt": [1, 2, 3, 4], "max_tokens": 1, "strata_cache_prefix": cp})
+            self.assertEqual(s, 400, cp)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -177,7 +177,10 @@ bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_ho
 
 void PromptCache::stash_live(int64_t keep_upto) {
     const int64_t L = (int64_t) live_.tokens.size();
-    if (stash_budget_ == 0 || L < kStashMin) return;
+    // a short sequence is not worth its copies, unless a client keeps a rolling prefix in it (a voice conversation of
+    // a few hundred tokens that a Hermes turn displaces between two decisions)
+    const bool rolling = std::any_of(live_.ckpts.begin(), live_.ckpts.end(), [](const Ckpt& c) { return c.roll; });
+    if (stash_budget_ == 0 || (L < kStashMin && !rolling)) return;
     if (ensure_kv && !ensure_kv(L)) return;
     uint64_t bytes = 0;
     for (const Part& p : kv_parts(L)) bytes += p.bytes;
@@ -261,7 +264,9 @@ int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<Im
         // The live sequence continues.  When the prompt drops most of it (another conversation that shares a
         // prefix), the rest goes to the stash; an edit near the end just overwrites it.
         const int64_t dropped = L - best;
-        if (dropped >= kStashMin && dropped > best) {
+        const bool rolling = std::any_of(live_.ckpts.begin(), live_.ckpts.end(),
+                                         [best](const Ckpt& c) { return c.roll && c.pos > best; });
+        if ((dropped >= kStashMin || rolling) && dropped > best) {
             live_.pin = best;
             stash_live(best);
             live_.pin = -1;
@@ -322,8 +327,12 @@ void PromptCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
     for (int64_t i = 0; i < n; ++i) live_.tokens.push_back(tokens[i]);
 }
 
-void PromptCache::checkpoint(int64_t pos) {
-    if (!enabled() || pos <= 0 || pos != (int64_t) live_.tokens.size() || find(live_, pos) != nullptr) return;
+void PromptCache::checkpoint(int64_t pos, bool roll) {
+    if (!enabled() || pos <= 0 || pos != (int64_t) live_.tokens.size()) return;
+    if (Ckpt* c = find(live_, pos)) {
+        c->roll = c->roll && roll;   // a conversation's own checkpoint there stays one
+        return;
+    }
     void* h = take_buffer(pos);
     if (h == nullptr) return;
     cudaDeviceSynchronize();
@@ -336,7 +345,22 @@ void PromptCache::checkpoint(int64_t pos) {
         return;
     }
     if (split) split_save(pos, h);
-    live_.ckpts.push_back({pos, h, ++clock_});
+    live_.ckpts.push_back({pos, h, ++clock_, roll});
+    if (!roll) return;
+    // the older rolling checkpoints go but the newest of them (a revised last word resumes there), and never the one
+    // this request resumed from
+    int64_t keep = -1;
+    for (const Ckpt& c : live_.ckpts)
+        if (c.roll && c.pos < pos && c.pos > keep) keep = c.pos;
+    for (size_t i = 0; i < live_.ckpts.size();) {
+        const Ckpt& c = live_.ckpts[i];
+        if (c.roll && c.pos < keep && c.pos != live_.pin) {
+            free_.push_back(c.host);
+            live_.ckpts.erase(live_.ckpts.begin() + (ptrdiff_t) i);
+        } else {
+            ++i;
+        }
+    }
 }
 
 void PromptCache::forget() {

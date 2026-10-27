@@ -1418,6 +1418,9 @@ class StrataEngine:
         # extends: no conversation checkpoint for it (#830).  It still reuses a cached prefix.  Absent = as before.
         if sampling.get("strata_checkpoint") is False:
             keys += " ckpt=0"
+        cp = sampling.get("strata_cache_prefix")         # serve/completions.py: a rolling checkpoint there
+        if isinstance(cp, int) and not isinstance(cp, bool) and cp > 0:
+            keys += f" roll={cp}"
         # #2228: the pictures' keys (hex, in prompt order): the engine matches a picture by them, not by its embeddings
         ik = sampling.get("strata_img_keys")
         if isinstance(ik, list) and ik and all(isinstance(k, str) and k and all(c in "0123456789abcdef" for c in k)

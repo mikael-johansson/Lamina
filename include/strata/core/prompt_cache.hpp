@@ -99,8 +99,10 @@ public:
     /// The cells [pos, pos + n) now hold `tokens`; pos <= live length, and anything after pos is gone.
     void set(int64_t pos, const int64_t* tokens, int64_t n);
     void set(int64_t pos, const int32_t* tokens, int64_t n);
-    /// Checkpoints the session, which is at `pos` == the live length.
-    void checkpoint(int64_t pos);
+    /// Checkpoints the session, which is at `pos` == the live length.  `roll`: a client's rolling prefix (roll=N, a
+    /// voice decision's context before its throw-away probe): it replaces the live sequence's older rolling checkpoints
+    /// but the newest one before it, so a conversation that grows a word at a time holds two, not one a request.
+    void checkpoint(int64_t pos, bool roll = false);
     /// Forgets the live sequence after a failed/cancelled request.
     void forget();
     /// Forgets the live sequence, every checkpoint and every stashed sequence (after non-finite logits: whatever the
@@ -111,7 +113,7 @@ public:
     std::string summary() const;
 
 private:
-    struct Ckpt { int64_t pos; void* host; uint64_t stamp; };
+    struct Ckpt { int64_t pos; void* host; uint64_t stamp; bool roll = false; };
     struct Seq {
         std::vector<int64_t> tokens;
         std::vector<ImgKey> imgs;

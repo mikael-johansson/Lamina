@@ -75,6 +75,16 @@ def parse(req: dict, tok, vocab_size: int | None, max_context: int) -> dict:
         sampling = {"score": allowed}                     # the head's own logits for these ids; nothing is sampled
     if req.get("priority") is not None:
         sampling["priority"] = req["priority"]           # (the admission tier: StrataEngine.generate_batched)
+    # "strata_cache_prefix": N - the first N prompt ids are the client's growing context, the rest a throw-away probe
+    # (a voice decision): the engine keeps a rolling checkpoint at N and none after it, so the next request with one
+    # more word resumes at N.  "strata_checkpoint": false - no checkpoint at all (a one-shot call)
+    cp = req.get("strata_cache_prefix")
+    if cp is not None:
+        if isinstance(cp, bool) or not isinstance(cp, int) or not 0 < cp < len(ids):
+            raise ValueError("strata_cache_prefix: a whole number of prompt ids, more than 0 and fewer than the prompt's")
+        sampling["strata_cache_prefix"] = cp
+    if req.get("strata_checkpoint") is False:
+        sampling["strata_checkpoint"] = False
     elif req.get("logit_bias"):                           # (a decision's bias is added to the scores: decision())
         sampling["logit_bias"] = req["logit_bias"]
     return {"ids": ids, "max_new": max_new, "sampling": sampling, "stop_ids": set(stop_ids), "allowed": allowed,
