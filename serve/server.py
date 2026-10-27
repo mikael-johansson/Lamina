@@ -1802,6 +1802,15 @@ class StrataEngine:
         with self.slot_cv:
             return any(e[0] * 2 <= plen for e in self.wait_lens)
 
+    def _voice_waiting(self, tier: int) -> bool:
+        """PRIORITY_SCHED: a voice request (T0/T1) of a higher tier than `tier` waits for the control lines.  A prompt
+        read gives way to it at its next chunk however often it has given way and however long the waiting prompt is
+        (#656's YIELDS_MAX and half-length rule are for agents among themselves)."""
+        if not PRIO_SCHED:
+            return False
+        with self.slot_cv:
+            return any(len(e) > 3 and e[3] is not None and e[3] <= 1 and e[3] < tier for e in self.wait_lens)
+
     def generate_batched(self, ids, max_new, sampling, cancel, embeddings=None):
         """--batch.  Alone (no slot busy, nobody waiting): the solo path (GEN, with drafts: the fastest stream)
         - and when another request arrives meanwhile, this one is STOPped and continues in a batch slot (BGEN with
@@ -1820,6 +1829,7 @@ class StrataEngine:
         # is the sampling dict on all three APIs); its tier orders the control lines and caps the slot pool.
         prio = read_priority((sampling or {}).get("priority"))
         tier = prio_tier(prio)
+        voice = PRIO_SCHED and tier <= 1 and not embeddings
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
@@ -1844,10 +1854,13 @@ class StrataEngine:
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                # PRIORITY_SCHED's voice tiers (T0 decisions, T1 replies) take the solo path even while slots decode:
+                # the engine pauses the slots for it (the GPUs to itself, vLLM's T1 exclusive window in effect, no slot
+                # reserved), a one-token decision too, and the prompt cache's rolling checkpoints are the solo path's
                 with self.slot_cv:
-                    alone = not any(self.slot_busy) and (self.waiting == 0 or force_solo)
+                    alone = voice or (not any(self.slot_busy) and (self.waiting == 0 or force_solo))
                 force_solo = False
-                if alone and left > 1:
+                if alone and (left > 1 or voice):
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
                     deadline = getattr(cancel, "_strata_queue_deadline", None)
@@ -1863,13 +1876,16 @@ class StrataEngine:
                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
                     self._ctl_erred = False
                     def others():
+                        if voice:                       # a voice request is not moved to a slot for anyone
+                            return False
                         with self.slot_cv:
                             return self.waiting > 0
 
                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
                         nonlocal reserved
-                        if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
-                                self._shorter_waiting(len(prompt))):
+                        if (reserved is None and not out and not embeddings and
+                                ((yields < self.YIELDS_MAX and self._shorter_waiting(len(prompt))) or
+                                 self._voice_waiting(tier))):
                             with self.slot_cv:          # the slot the part read will wait in
                                 reserved = self.pick_slot(prompt, tier)
                                 if reserved is not None:
@@ -1997,8 +2013,9 @@ class StrataEngine:
 
                     def ask():        # as give_way above, for the slot this admission reads into
                         nonlocal asked
-                        if (not asked and not embeddings and yields < self.YIELDS_MAX and
-                                self._shorter_waiting(len(prompt))):
+                        if (not asked and not embeddings and
+                                ((yields < self.YIELDS_MAX and self._shorter_waiting(len(prompt))) or
+                                 self._voice_waiting(tier))):
                             self._send(f"BYIELD {slot}")
                             asked = True
 
@@ -2035,6 +2052,7 @@ class StrataEngine:
                             with self.slot_cv:
                                 self.slot_busy[slot] = False
                                 self.slot_claims.discard(slot)
+                                self.slot_tier.pop(slot, None)
                                 self.slot_cv.notify_all()
                             slot = None
                             if holding:

@@ -437,6 +437,39 @@ class ParallelService(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(self.engine.slot_busy, [False, False])
 
+    def test_voice_tier_goes_solo_while_slots_decode(self):
+        """PRIORITY_SCHED: a voice decision (priority -20) that arrives while agents decode in the slots runs on the
+        solo path at once (the engine pauses the slots for it) - a one-token decision too - and is answered before the
+        agents end; no slot is reserved for it."""
+        self.start(2)
+        out, done_at = {}, {}
+        def go(k, text, max_tokens, priority=None):
+            body = {"messages": [{"role": "user", "content": text}], "max_tokens": max_tokens, "reasoning_effort": "none"}
+            if priority is not None:
+                body["priority"] = priority
+            req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                out[k] = json.loads(r.read().decode())
+            done_at[k] = time.monotonic()
+        import serve.server as server
+        with mock.patch.object(server, "PRIO_SCHED", True):
+            agents = [threading.Thread(target=go, args=(k, f"{k} LONGREPLY", 64)) for k in ("a", "b")]
+            for t in agents:
+                t.start()
+                time.sleep(0.15)
+            until = time.monotonic() + 5
+            while not any(self.engine.slot_busy) and time.monotonic() < until:
+                time.sleep(0.01)
+            time.sleep(0.1)                     # (the admission's first window: the slot decodes)
+            self.assertTrue(any(self.engine.slot_busy))
+            go("voice", "yes or no", 1, priority=-20)
+            for t in agents:
+                t.join(30)
+        self.assertLess(done_at["voice"], max(done_at["a"], done_at["b"]))
+        self.assertEqual(out["voice"]["usage"]["completion_tokens"], 1)
+        self.assertRegex(self.log.read_text(), r"(?m)^GEN None \d+ [12]$")    # solo, beside an active slot
+
     def test_engine_reports_fewer_slots(self):
         self.start(4, fit=2)
         self.assertEqual(self.engine.batch, 2)
