@@ -2,7 +2,7 @@
 """Replay logged Hermes traffic against a Strata server at its recorded pace: a stress / soak test.
 
     python3 bench/replay.py --config configs/fork-iq3_s-split-batch.json --from 2026-10-12T05:00 --minutes 30 \
-        --tag soak1 [--speed 1.0] [--max-tokens 1024] [--kinds main,side] [--stall 60] [--start]
+        --tag soak1 [--speed 1.0] [--max-tokens 0] [--kinds main,side] [--stall 60] [--start]
 
 The requests are the vLLM request logs' Hermes ones (bench/extract_requests.LOGS; only the === REQUEST === bodies are
 read, never the headers): the agent's own turns ("main": the Hermes Agent system prompt) and its side calls ("side":
@@ -65,11 +65,12 @@ class Run:
         body["stream"] = True
         body.pop("stream_options", None)
         cap = self.a.max_tokens
-        for k in ("max_tokens", "max_completion_tokens"):
-            if k in body and body[k]:
-                body[k] = min(int(body[k]), cap)
-        if not body.get("max_tokens") and not body.get("max_completion_tokens"):
-            body["max_tokens"] = cap
+        if cap > 0:  # 0: the budgets as logged
+            for k in ("max_tokens", "max_completion_tokens"):
+                if k in body and body[k]:
+                    body[k] = min(int(body[k]), cap)
+            if not body.get("max_tokens") and not body.get("max_completion_tokens"):
+                body["max_tokens"] = cap
         body.pop("model", None)
         headers = {"Content-Type": "application/json"}
         if self.key:
@@ -102,8 +103,9 @@ class Run:
                     if got:
                         if rec["ttft_s"] is None:
                             rec["ttft_s"] = round(now - t0, 2)
-                        else:
-                            rec["max_gap_s"] = max(rec["max_gap_s"], round(now - rec["last"], 2))
+                        elif now - rec["last"] > rec["max_gap_s"]:
+                            rec["max_gap_s"] = round(now - rec["last"], 2)
+                            rec["max_gap_end"] = time.strftime("%H:%M:%S", time.localtime(now))   # (the logs' clock)
                         rec["tokens"] += 1
                         rec["last"] = now
                     if ch.get("finish_reason"):
@@ -185,7 +187,7 @@ def main():
     ap.add_argument("--minutes", type=float, default=30)
     ap.add_argument("--speed", type=float, default=1.0, help="replay pace: 2 = twice as fast as recorded")
     ap.add_argument("--kinds", default="main,side")
-    ap.add_argument("--max-tokens", type=int, default=1024)
+    ap.add_argument("--max-tokens", type=int, default=0)
     ap.add_argument("--stall", type=float, default=60, help="seconds a request may stay silent before it is flagged")
     ap.add_argument("--first-wait", type=float, default=600, help="seconds a request may wait for its first chunk")
     ap.add_argument("--timeout", type=float, default=1800)

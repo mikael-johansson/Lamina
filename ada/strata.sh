@@ -11,11 +11,11 @@ case "$1" in
     (cd eddoursul && exec setsid nohup .venv/bin/python serve/server.py --engine strata --config "../$cfg") \
        > "$log" 2>&1 < /dev/null &
     echo "starting $cfg, log: $log"
-    until grep -q "^ready:" "$log" 2>/dev/null; do
+    until grep -q "ready: http" "$log" 2>/dev/null; do
       pgrep -f '[s]erve/server.py --engine strata' >/dev/null || { echo "failed:"; tail -5 "$log"; exit 1; }
       sleep 2
     done
-    grep -A1 "^ready:" "$log" | tail -1 ;;
+    grep -A1 "ready: http" "$log" | tail -1 ;;
   stop)
     pkill -f '[s]erve/server.py --engine strata' && echo stopping
     while pgrep -f '[b]uild/strata[.a-z0-9-]* --serve' >/dev/null; do sleep 1; done; echo stopped ;;

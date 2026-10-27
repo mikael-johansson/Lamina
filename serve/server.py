@@ -602,7 +602,7 @@ def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: 
             text = f.read(64 * 1024).decode("utf-8", "replace")
     except (OSError, ValueError):
         return False
-    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    lines = [_unstamp(x.strip()) for x in text.splitlines() if x.strip()]
     engine_lines = [x for x in lines if not x.startswith("[strata]")]
     if any(m in text for m in TRANSIENT_START_MARKS):
         return all(x.startswith("terminate called") or x.startswith("what()") or
@@ -997,8 +997,13 @@ class StrataEngine:
             pin["preexec_fn"] = lambda: os.sched_setaffinity(0, cpus)
         end_leftover_engines(exe)                        # one an earlier run lost still holds the GPU and the memory
         spawned_at = time.monotonic()
+        # the engine's log lines with the time each was written (STRATA_LOG_TS=0: as the engine writes them)
+        ts_log = self.log is not None and os.environ.get("STRATA_LOG_TS", "1") != "0"
         self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env, **pin)
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE if ts_log else self.log, text=True,
+                          encoding="utf-8", bufsize=1, env=env, **pin)
+        if ts_log:
+            threading.Thread(target=_stamp_lines, args=(self.proc.stderr, self.log), daemon=True).start()
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
         ready_q: queue.Queue = queue.Queue()
@@ -1064,7 +1069,7 @@ class StrataEngine:
             note = "" if timed_out else start_exit_note(self.proc.returncode, exe)
             tail = start_log_tail(log, log_start)
             lines = [x for x in tail.split("\n")[2:] if x.strip()]
-            if tail and lines and all(x.strip().startswith("[strata]") for x in lines):
+            if tail and lines and all(_unstamp(x.strip()).startswith("[strata]") for x in lines):
                 tail += "\n  (those are the launcher's own lines: the engine itself wrote nothing)"
             raise EngineDied(why + (f" (see {log})" if log else "") + note +
                              start_failure_hint(log, log_start) + tail)
@@ -7691,7 +7696,60 @@ def _component_exe(reference: str, cfg: dict) -> str:
         raise SystemExit(e.exit_code) from None
 
 
+_STAMP = re.compile(r"^\d\d:\d\d:\d\d\.\d{3} ")
+
+
+def _unstamp(line):
+    """A log line without the time _stamp put before it."""
+    return _STAMP.sub("", line, count=1)
+
+
+def _stamp(line):
+    t = time.time()
+    return f"{time.strftime('%H:%M:%S', time.localtime(t))}.{int(t * 1000) % 1000:03d} {line}"
+
+
+def _stamp_lines(src, dst):
+    """The engine's stderr into its log, each line with the time it came (a stall then lines up with the clients')."""
+    try:
+        for line in src:
+            try:
+                dst.write(_stamp(line))
+                dst.flush()
+            except (OSError, ValueError):
+                pass
+    except (OSError, ValueError):
+        pass
+
+
+class _StampedOut:
+    """This server's own output (its progress lines) with the time of each line (STRATA_LOG_TS=0: without)."""
+    def __init__(self, out):
+        self._out, self._bol = out, True
+
+    def write(self, s):
+        if not s:
+            return 0
+        parts = s.split("\n")
+        res = []
+        for i, part in enumerate(parts):
+            if part and self._bol:
+                part = _stamp(part)
+            res.append(part)
+            if i < len(parts) - 1:
+                self._bol = True
+            elif part:
+                self._bol = False
+        self._out.write("\n".join(res))
+        return len(s)
+
+    def __getattr__(self, name):
+        return getattr(self._out, name)
+
+
 def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> int:
+    if os.environ.get("STRATA_LOG_TS", "1") != "0" and not sys.stdout.isatty() and not isinstance(sys.stdout, _StampedOut):
+        sys.stdout = _StampedOut(sys.stdout)
     try:                                               # files made by a run as administrator still belong to the user
         from strata_control import private_files as _pf
         _pf.adopt_user_defaults()
