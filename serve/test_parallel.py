@@ -132,7 +132,8 @@ while True:
                 log.write(f"REFUSED {slot}\n"); log.flush()
             continue
         if log:
-            log.write(f"{f[0]} {slot} {len(ids)} {max(len(active), 0)}\n"); log.flush()
+            ck = "".join(f" {k}" for k in f if k.startswith("chunk="))
+            log.write(f"{f[0]} {slot} {len(ids)} {max(len(active), 0)}{ck}\n"); log.flush()
         pb = bytes(int(x) & 255 for x in ids)
         mark = b"NFSOLO" if f[0] == "GEN" else b"NFADMIT"
         if mark in pb and mark not in fired:
@@ -609,6 +610,25 @@ class ParallelService(unittest.TestCase):
         self.assertLess(heads.index("BGEN"), len(heads) - 1 - heads[::-1].index("GEN"), log)
         time.sleep(0.3)
         self.assertEqual(self.engine.slot_busy, [False, False])
+
+    def test_a_read_begun_while_somebody_talks_goes_in_voice_chunks(self):
+        """A read that starts within the voice window (RESERVE_WHILE_VOICE_S after a voice request) is sent with the
+        voice chunk from the start, so a voice request arriving during it waits one small chunk, not the configured
+        one; outside the window it goes as configured."""
+        self.start(2)
+        import serve.server as server
+        with mock.patch.object(server, "PRIO_SCHED", True), \
+                mock.patch.object(StrataEngine, "RESERVE_WHILE_VOICE_S", 30.0):
+            self.chat("quiet agent turn")
+            self.engine.voice_seen_at = time.monotonic()
+            self.chat("agent turn while somebody talks")
+            self.engine.voice_seen_at = time.monotonic() - 31
+            self.chat("quiet again")
+        gens = [l for l in self.log.read_text().splitlines() if l.startswith("GEN")]
+        self.assertEqual(len(gens), 3, gens)
+        self.assertNotIn("chunk=", gens[0])
+        self.assertIn(f"chunk={StrataEngine.VOICE_CHUNK}", gens[1])
+        self.assertNotIn("chunk=", gens[2])
 
     def test_engine_reports_fewer_slots(self):
         self.start(4, fit=2)

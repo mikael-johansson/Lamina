@@ -1912,6 +1912,11 @@ class StrataEngine:
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                # a read begun while somebody talks goes in voice-sized chunks from the start: a STOP waits for the
+                # chunk in flight, and the configured chunk kept the first voice request waiting ~5.7 s at 58K
+                if (self.VOICE_CHUNK and not voice and not embeddings and " chunk=" not in keys and
+                        self._voice_recent()):
+                    keys += f" chunk={self.VOICE_CHUNK}"
                 # PRIORITY_SCHED's voice tiers (T0 decisions, T1 replies) take the solo path even while slots decode:
                 # the engine pauses the slots for it (the GPUs to itself, vLLM's T1 exclusive window in effect, no slot
                 # reserved), a one-token decision too, and the prompt cache's rolling checkpoints are the solo path's
@@ -2362,6 +2367,14 @@ class StrataEngine:
     slot_groups = 1         # --batch-groups (set when the engine starts)
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
+
+    VOICE_RECENT_S = 60.0   # without RESERVE_WHILE_VOICE_S: how long after a voice request somebody counts as talking
+
+    def _voice_recent(self) -> bool:
+        """A voice request (T0/T1) came in within RESERVE_WHILE_VOICE_S (VOICE_RECENT_S when that is off)."""
+        seen = getattr(self, "voice_seen_at", None)
+        window = self.RESERVE_WHILE_VOICE_S if self.RESERVE_WHILE_VOICE_S > 0 else self.VOICE_RECENT_S
+        return PRIO_SCHED and seen is not None and time.monotonic() - seen < window
 
     def _reserved_now(self) -> int:
         """The slots held back for T0/T1 now: PRIO_RESERVED_SLOTS, with RESERVE_WHILE_VOICE_S only that long after the
