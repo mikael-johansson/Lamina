@@ -1821,12 +1821,12 @@ class StrataEngine:
             return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
 
     def _slot_turn(self, swait: list) -> bool:
-        """(The caller holds slot_cv.)  No request of a better tier waits for a slot (`swait`: [tier, arrival]): a slot
-        that frees is a voice request's before an agent's.  Within a tier whoever holds the control lines takes it:
-        the lines go short-first, not in arrival order, so an arrival-order turn made the holder give them back and
-        sleep while the slot stayed free and the turn's owner waited for the lines (live: a Hermes request waited 96 s
-        with no slot busy, Hermes TTFT 90 s on 800-token reads)."""
-        return not any(w is not swait and w[0] < swait[0] for w in self.slot_waiters)
+        """(The caller holds slot_cv.)  No request waiting for a slot comes before this one (`swait`: [tier, arrival];
+        the better tier first, then the earlier): a slot that frees is the first waiter's.  A waiter takes the control
+        lines again only once it is its turn and a slot is free (the wait loop below): when it took them at once, the
+        holder was seldom the turn's owner, gave them back and slept while the slot stayed free (live: a Hermes
+        request waited 96 s with no slot busy)."""
+        return not any(w is not swait and w < swait for w in self.slot_waiters)
 
     def _slot_unwait(self, swait: list) -> bool:
         """(The caller holds slot_cv.)  `swait` out of the slot_waiters; False when it was not there."""
@@ -2054,8 +2054,16 @@ class StrataEngine:
                             if holding:
                                 self.ctl.release()
                                 holding = False
-                            with self.slot_cv:
-                                if not self._slot_turn(swait) or self.pick_slot(prompt, tier) is None:
+                            # the control lines are taken again only once a slot is free and it is this request's
+                            # turn (see _slot_turn); until then it waits without them
+                            beat = time.monotonic()
+                            while not cancel.is_set():
+                                deadline = getattr(cancel, "_strata_queue_deadline", None)
+                                if deadline is not None and time.monotonic() >= deadline:
+                                    raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                                with self.slot_cv:
+                                    if self._slot_turn(swait) and self.pick_slot(prompt, tier) is not None:
+                                        break
                                     if (ENGINE_STALL_S or 0) > 0 and time.monotonic() - admit_since >= ENGINE_STALL_S:
                                         # the stall check of #1317 only watches a request on the control lines; one
                                         # waiting here is covered by looking for a slot nobody owns, and by saying so
@@ -2066,9 +2074,11 @@ class StrataEngine:
                                                   f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
                                                   f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
                                     self._reap_orphan_slots()
-                                if not self._slot_turn(swait) or self.pick_slot(prompt, tier) is None:
                                     wait_remaining = deadline - time.monotonic() if deadline is not None else 1.0
                                     self.slot_cv.wait(timeout=min(1.0, max(0, wait_remaining)))
+                                if time.monotonic() - beat >= 10.0:     # a heartbeat every 10 s, as _take_control's
+                                    beat = time.monotonic()
+                                    yield None
                             if cancel.is_set():
                                 return
                             if not holding:
