@@ -1938,8 +1938,8 @@ class StrataEngine:
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         swait = [float(tier if PRIO_SCHED else 0), time.monotonic()]   # its place among the slot_waiters
-        if PRIO_SCHED and tier <= 1:
-            self.voice_seen_at = swait[1]               # (RESERVE_WHILE_VOICE_S: the reserved slots held back from now)
+        if PRIO_SCHED and tier <= 1:                    # (RESERVE_WHILE_VOICE_S: the reserved slots held back from now;
+            self._voice_active_until(swait[1])          # a reply still being spoken may count to later)
         ok = yield from self._take_control(cancel, len(prompt), new=True, priority=prio, order=swait[1])
         if not ok:
             return
@@ -2378,6 +2378,9 @@ class StrataEngine:
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
+            if PRIO_SCHED and tier <= 1 and out and self.VOICE_SPEECH_S > 0:
+                # the reply is spoken after it is generated: somebody talks until about then
+                self._voice_active_until(time.monotonic() + min(len(out) * self.VOICE_SPEECH_S, self.VOICE_SPEECH_MAX_S))
             try:
                 if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
                     phase = "none"                      # #1012: its engine is gone: nothing to stop or drain
@@ -2448,6 +2451,14 @@ class StrataEngine:
     VOICE_HOLD_S = 0.0      # "prio_voice_hold_s": an agent read with VOICE_STOP_MIN or more left waits until voice has
                             # been quiet this long (0: off), so a voice decision finds the control lines free
     VOICE_HOLD_MAX_S = 300.0  # "prio_voice_hold_max_s": ... but never longer than this after the request came in
+    VOICE_SPEECH_S = 0.0    # "prio_voice_speech_s": seconds a voice reply's output token takes to speak (0: off); voice
+                            # counts as active until its reply has been spoken, so the hold does not lapse mid-playback
+    VOICE_SPEECH_MAX_S = 60.0   # ... at most this long after the reply ends
+
+    def _voice_active_until(self, t: float) -> None:
+        """Voice counts as active at `t` (the hold, the reserve and the voice chunks run from the latest such time)."""
+        seen = getattr(self, "voice_seen_at", None)
+        self.voice_seen_at = t if seen is None else max(seen, t)
 
     def _voice_hold(self, since: float) -> bool:
         """VOICE_HOLD_S: a voice request came in within VOICE_HOLD_S, and the agent request that came in at `since`
@@ -8692,7 +8703,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if isinstance(cfg.get("prio_voice_chunk"), int) and not isinstance(cfg.get("prio_voice_chunk"), bool):
         StrataEngine.VOICE_CHUNK = max(0, cfg["prio_voice_chunk"])
     for key, attr in (("prio_voice_hold_s", "VOICE_HOLD_S"), ("prio_voice_hold_max_s", "VOICE_HOLD_MAX_S"),
-                      ("prio_agent_slice_s", "AGENT_SLICE_S")):
+                      ("prio_agent_slice_s", "AGENT_SLICE_S"), ("prio_voice_speech_s", "VOICE_SPEECH_S")):
         if isinstance(cfg.get(key), (int, float)) and not isinstance(cfg.get(key), bool):
             setattr(StrataEngine, attr, max(0.0, float(cfg[key])))
     if isinstance(cfg.get("prio_reserve_while_voice_s"), (int, float)) and not isinstance(cfg.get("prio_reserve_while_voice_s"), bool):
@@ -8707,7 +8718,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                StrataEngine.RESERVE_WHILE_VOICE_S > 0 and PRIO_RESERVED_SLOTS else "") + ")", flush=True)
         if StrataEngine.VOICE_HOLD_S > 0:
             print(f"[strata] voice hold: agent reads of {StrataEngine.VOICE_STOP_MIN} tokens or more wait until voice has "
-                  f"been quiet {StrataEngine.VOICE_HOLD_S:g} s (at most {StrataEngine.VOICE_HOLD_MAX_S:g} s)", flush=True)
+                  f"been quiet {StrataEngine.VOICE_HOLD_S:g} s (at most {StrataEngine.VOICE_HOLD_MAX_S:g} s)" +
+                  (f"; a voice reply counts as voice until spoken ({StrataEngine.VOICE_SPEECH_S:g} s a token, at most "
+                   f"{StrataEngine.VOICE_SPEECH_MAX_S:g} s)" if StrataEngine.VOICE_SPEECH_S > 0 else ""), flush=True)
         if StrataEngine.AGENT_SLICE_S > 0:
             print(f"[strata] agent slices: a read with {StrataEngine.VOICE_STOP_MIN} tokens or more left gives the control "
                   f"lines to the next request after {StrataEngine.AGENT_SLICE_S:g} s", flush=True)

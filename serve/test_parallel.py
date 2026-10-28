@@ -718,6 +718,34 @@ class ParallelService(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(self.engine.slot_busy, [False, False])
 
+    def test_a_voice_reply_counts_as_voice_until_it_has_been_spoken(self):
+        """prio_voice_speech_s: a voice reply's output tokens take that long each to speak, so voice counts as active
+        until then (the hold does not lapse mid-playback); a later voice request never moves that back."""
+        self.start(2)
+        import serve.server as server
+        def voice(text):
+            body = {"messages": [{"role": "user", "content": text}], "max_tokens": 16, "reasoning_effort": "none",
+                    "priority": -5}
+            req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode())
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(StrataEngine, "VOICE_SPEECH_S", 2.0), \
+                mock.patch.object(StrataEngine, "VOICE_HOLD_S", 1.0):
+            r = voice("say something")
+            n = r["usage"]["completion_tokens"]
+            self.assertGreater(n, 0)
+            until = self.engine.voice_seen_at
+            self.assertGreater(until - time.monotonic(), 2.0 * n - 1.0)   # spoken until about n tokens from now
+            self.assertTrue(self.engine._voice_hold(time.monotonic()))
+            with mock.patch.object(StrataEngine, "VOICE_SPEECH_S", 0.0):
+                voice("and again")                                         # comes in mid-playback
+            self.assertEqual(self.engine.voice_seen_at, until)
+        with mock.patch.object(server, "PRIO_SCHED", True):
+            self.engine.voice_seen_at = None
+            voice("off by default")
+            self.assertLessEqual(self.engine.voice_seen_at, time.monotonic())
+
     def test_a_long_agent_read_gives_way_to_another_agent_after_its_slice(self):
         """prio_agent_slice_s: an agent's long read that has had the control lines that long gives way (STOP) to
         another agent waiting for them and goes on after it, from the prompt cache."""
