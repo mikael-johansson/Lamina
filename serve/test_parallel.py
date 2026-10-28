@@ -261,6 +261,17 @@ class PickSlot(unittest.TestCase):
         e.slot_group = [0] * n
         return e
 
+    def test_a_read_with_no_pp_line_yet_has_nothing_known_left(self):
+        """The give-ways (voice STOP, hold, slice) count only what a read's own PP lines say is left: a prompt the
+        cache serves sends none, so it is never STOPped during its restore (live 10:05: a 178K prompt with 5 tokens to
+        read was, decision after decision)."""
+        e = self.engine(2)
+        e.progress = None
+        self.assertEqual(e._read_known_left(), 0)
+        self.assertGreater(e._read_left(), 1 << 20)
+        e.progress = (4096, 20000)
+        self.assertEqual(e._read_known_left(), 15904)
+
     def test_the_slot_turn_puts_voice_first_then_arrival(self):
         """A slot that frees goes to a waiting voice request before any agent, and among agents to the one that came
         first (a later agent that holds the control lines does not take it)."""

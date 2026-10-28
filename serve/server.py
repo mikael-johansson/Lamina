@@ -1891,7 +1891,10 @@ class StrataEngine:
                             # a STOP waits for the chunk in flight through both stages of the split (~2 chunk-times)
 
     def _read_left(self) -> int:
-        """The prompt tokens the read on the control lines has left (from its PP lines; unknown: a lot)."""
+        """The prompt tokens the read on the control lines has left (from its PP lines; unknown: a lot).  The give-ways
+        use _read_known_left: with "unknown: a lot" a voice STOP caught a 178K prompt the cache served (5 tokens to
+        read) during its restore, and it and the voice session took turns in the main session, ~1.8 s a decision
+        (live 10:05:28)."""
         p = self.progress
         return max(0, p[1] - p[0]) if p else 1 << 30
 
@@ -1993,7 +1996,7 @@ class StrataEngine:
                         if (self.VOICE_STOP and not voice_stop and not out and not embeddings and
                                 (self._voice_waiting(tier) or self._hold_read(tier, swait[1]) or
                                  self._slice_over(tier)) and
-                                self._read_left() >= self.VOICE_STOP_MIN):
+                                self._read_known_left() >= self.VOICE_STOP_MIN):
                             sliced = not self._voice_waiting(tier) and not self._hold_read(tier, swait[1])
                             self._send("STOP")
                             voice_stop = True
@@ -2177,7 +2180,7 @@ class StrataEngine:
                         if (self.VOICE_STOP and not voice_stop and not out and not embeddings and
                                 (self._voice_waiting(tier) or self._hold_read(tier, swait[1]) or
                                  self._slice_over(tier)) and
-                                self._read_left() >= self.VOICE_STOP_MIN):
+                                self._read_known_left() >= self.VOICE_STOP_MIN):
                             sliced = not self._voice_waiting(tier) and not self._hold_read(tier, swait[1])
                             self._send("STOP")           # (this engine ignores BYIELD: see voice_stop)
                             voice_stop = True
