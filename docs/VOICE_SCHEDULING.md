@@ -16,7 +16,9 @@ subagents, 25K–190K contexts) keep working. Agent long reads may wait while so
   each other and with the read on the control lines; they share the GPUs.
 - **A read stops only between chunks.** `STOP` is checked before each chunk of `chunk=` tokens (the server's per-request
   key) or `--prefill` (16384). A chunk runs all 48 layers and updates the recurrent (GDN) states in place, so it can't
-  be abandoned half way. Under load with two slots decoding, a 4K chunk takes about 2.4 s.
+  be abandoned half way. With the layer split the two GPUs' stages are pipelined: a STOP waits for the chunk in
+  flight on both, so about two chunk-times (8K tokens at 4K chunks; seen at 18:13: STOP at 49,152, leg end at 57,344).
+  Under load with two slots decoding that is about 2.4–4 s.
 - **Progress lines (PP) arrive per 16K step, not per chunk.** The engine reads a prompt in steps of `--cache-every`
   (16384), one checkpoint each, and counts progress at each step's end. "16,384 of N" therefore doesn't show the chunk
   size.
@@ -124,7 +126,7 @@ from 2478 to 1439 tok/s.
 | A fresh agent read in progress (one 4K chunk + STOP) | ~0.7 s light load, ~2.4 s with two slots decoding |
 | An agent read past the 300 s cap, during continuous talk | ~2.4 s each, until the read is done (17:44: ~25 decisions in a row at 2.2–2.5 s) |
 | First request of a session (a read began in 16K chunks before voice) | up to one 16K chunk, ~5–10 s (inferred: the one instance seen, 10.3 s, was a replay warm-up, not a decision) |
-| A restore-heavy agent leg (most of its context from a sibling's cache) | seen 4.5–5.9 s: the STOP landed late (open) |
+| A long agent leg under load (two 4K chunks in flight) | seen 4.4–5.9 s (17:09, 18:13) |
 
 ## 10. Measurements (voice-lab-74, replay of a real Nova session under the user's Hermes load)
 
@@ -135,9 +137,10 @@ from 2478 to 1439 tok/s.
 | (b) 2 slots, none reserved | 250 / 2820 ms | 69 of 209 | – | 8.7 req/min; GPUs idle while reads were held |
 | (c) 3 slots, 1 reserved for 600 s | 204 / 420 ms | 13 of 209 | 1.2 s | short-read wait p50 1.6 s (was 23 s) |
 | (c) + speech 0.3 | 248 / 972 ms | 20 of 209 | – | load rose mid-run; after_reply 0.18–3.4 s (in (c) the two slow ones were 4.7 and 3.9 s, the rest under 1 s) |
-| (c) + speech, 17:04 (client variant, same requests) | 227 / 1056 ms | 24 of 209 (max 6655 ms: the restore-heavy leg, §9) | – | – |
+| (c) + speech, 17:04 (client variant, same requests) | 227 / 1056 ms | 24 of 209 (max 6655 ms: two chunks in flight, §9) | – | – |
 | (c) + speech, e8d2ea00, 17:31 | 224 / 759 ms | 17 of 209 | – | short p50 2.1 s |
 | (c) + speech, e8d2ea00, 17:41 (a read past the cap) | 328 / 2739 ms | 48 of 209 (max 4560 ms) | – | short p50 10.7 s |
+| d631f5ca, K/V pool 524288, 18:07 (light Hermes load) | 182 / 417 ms | 8 of 209 (max 5045 ms) | – | short p50 1.6 s; long reads held 245 / 300 s |
 
 The user's load varies from run to run, so the Hermes request counts don't compare well across runs.
 
@@ -181,8 +184,10 @@ the main GPU, 130 on the second.
 1. **A cheaper STOP.** About 2.4 s per word check while a long read runs is the chunk time plus a ~0.5 s swap.
    Copying the stash into a reusable pinned buffer should cut the swap. Stopping inside a chunk would need the
    recurrent states rolled back to the chunk start, which is engine work.
-2. **Restore-heavy legs.** At 17:09 a 135K read leg read ~90K tokens in 11 s and the STOP landed only at the leg's end.
-   That needs engine tracing to explain.
+2. **Reading the engine's leg line.** "N prompt tokens (C cached) in X ms (R tok/s)" divides all of N - C by the leg's
+   time even when a STOP ended the leg early: what was read is the next line's "live L cells" less C. (The 17:09 and
+   18:13 "8-9K tok/s" legs read 24K and 53K at ~2.5K tok/s.) Halving the STOP wait means one chunk in flight at a
+   STOP instead of two (the split's pipelining), or 2K chunks only while a T0 waits: engine work.
 3. **The cold first decision of a session.** A read that began in 16K chunks before any voice can hold the first
    decision for one 16K chunk.
 4. **The bigger K/V pool is new** (18:04). Watch the hit rate while two big conversations hold ~4 GiB of pages.
