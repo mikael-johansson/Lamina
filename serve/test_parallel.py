@@ -272,6 +272,20 @@ class PickSlot(unittest.TestCase):
         e.progress = (4096, 20000)
         self.assertEqual(e._read_known_left(), 15904)
 
+    def test_a_stopped_leg_counts_what_its_done_says_is_left(self):
+        """A read STOPped in its last chunk reads that chunk through (the engine takes a STOP between chunks): its
+        DONE then says next to nothing is left, and it is not held for voice on the STOP's own figure (live 16:46: a
+        121K read with 9 tokens left sat out the whole 300 s hold cap)."""
+        e = self.engine(2)
+        self.assertEqual(e._leg_left({"prompt_tokens": 121620, "reused": 0, "prompt_read": 121611}), 9)
+        self.assertEqual(e._leg_left({"prompt_tokens": 121620, "reused": 60000, "prompt_read": 20000}), 41620)
+        e.progress, e.prefill_tok_s_mean = None, None                  # an engine without the field, no PP line
+        self.assertEqual(e._leg_left({"prompt_tokens": 100, "reused": 0}), float("inf"))
+        e.progress, e.prefill_tok_s_mean, e.progress_at = (109297, 121619), 5000.0, time.monotonic() - 10.0
+        self.assertEqual(e._leg_left(None), 0.0)                        # 12K left, then 10 s at 5000 tok/s: read through
+        e.progress_at = time.monotonic() - 1.0
+        self.assertGreater(e._leg_left(None), 7000)                     # STOPped at the next chunk: most still left
+
     def test_the_slot_turn_puts_voice_first_then_arrival(self):
         """A slot that frees goes to a waiting voice request before any agent, and among agents to the one that came
         first (a later agent that holds the control lines does not take it)."""

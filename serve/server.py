@@ -1568,6 +1568,7 @@ class StrataEngine:
                 if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
                     self.progress = (int(f[1]), int(f[2]))
                     self.progress_ms = float(f[3]) if len(f) >= 4 else 0.0
+                    self.progress_at = time.monotonic()
                     self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
                 if not stopped and cancel.is_set():
                     # #879: a Stop during the prompt read went out only after the first token (or after 10 s of
@@ -2051,6 +2052,8 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("gave way to a voice request")
+                        if hold_ok and self._leg_left(self.last) < self.VOICE_STOP_MIN:
+                            hold_ok = False                 # the STOP came in its last chunk: next to nothing is left
                         if hold_ok:
                             yield from self._hold_for_voice(cancel, swait[1])
                         if cancel.is_set():
@@ -2299,6 +2302,8 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("admission gave way to a voice request")
+                        if hold_ok and self._leg_left(self.last) < self.VOICE_STOP_MIN:
+                            hold_ok = False
                         if hold_ok:
                             yield from self._hold_for_voice(cancel, swait[1])
                         if cancel.is_set():
@@ -2490,6 +2495,19 @@ class StrataEngine:
         p = self.progress
         return max(0, p[1] - p[0]) if p else 0
 
+    def _leg_left(self, leg: dict | None) -> float:
+        """The prompt tokens a STOPped leg left unread: by its DONE (total - cached - read) when it says, else its last
+        PP line's figure less what it read at its mean rate since (the engine takes a STOP between chunks and prints
+        no PP line after its last one: a STOP in the last chunk reads the prompt through)."""
+        try:
+            return max(0, int(leg["prompt_tokens"]) - int(leg["reused"]) - int(leg["prompt_read"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        rate, at = self.prefill_tok_s_mean, getattr(self, "progress_at", None)
+        if not self.progress or not rate or at is None:
+            return float("inf")
+        return max(0.0, self._read_known_left() - rate * (time.monotonic() - at))
+
     def _hold_read(self, tier: int, since: float) -> bool:
         """An agent's read (T2/T3) with VOICE_STOP_MIN or more known left, to be STOPped and held for voice."""
         return tier >= 2 and self._read_known_left() >= self.VOICE_STOP_MIN and self._voice_hold(since)
@@ -2666,6 +2684,7 @@ class StrataEngine:
                     if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
                         self.progress = (int(f[1]), int(f[2]))             # prompt progress, one per chunk: also a heartbeat (the
                         self.progress_ms = float(f[3]) if len(f) >= 4 else 0.0
+                        self.progress_at = time.monotonic()
                         self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
                         rate, chunk = self.prefill_tok_s_mean or 0.0, int(f[1]) - read_to
                         read_to = int(f[1])
