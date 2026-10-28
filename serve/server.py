@@ -1778,6 +1778,7 @@ class StrataEngine:
                 self.waiting = max(0, self.waiting - 1)
                 if entry in self.wait_lens:
                     self.wait_lens.remove(entry)
+        self.progress = None                            # (the PP lines from here on are this request's read)
         with self.slot_cv:
             self.ctl_epoch += 1
             self.slot_cv.notify_all()
@@ -1888,6 +1889,7 @@ class StrataEngine:
         # for is STOPped at its next chunk: the part read stays in the prompt cache, the voice requests take the control
         # lines, and the read is sent again and goes on from the cache (#656's give-way, as this engine can do it)
         voice_stop = False
+        hold_ok = False     # VOICE_HOLD_S: its last STOP came with VOICE_STOP_MIN or more known left (its own PP line)
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
@@ -1948,12 +1950,13 @@ class StrataEngine:
                             return self.waiting > 0
 
                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
-                        nonlocal reserved, voice_stop
+                        nonlocal reserved, voice_stop, hold_ok
                         if (self.VOICE_STOP and not voice_stop and not out and not embeddings and
                                 (self._voice_waiting(tier) or self._hold_read(tier, swait[1])) and
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")
                             voice_stop = True
+                            hold_ok = self._read_known_left() >= self.VOICE_STOP_MIN
                             return
                         if voice_stop:
                             return
@@ -2004,7 +2007,8 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("gave way to a voice request")
-                        yield from self._hold_for_voice(cancel, swait[1])
+                        if hold_ok:
+                            yield from self._hold_for_voice(cancel, swait[1])
                         if cancel.is_set():
                             return
                         ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
@@ -2124,7 +2128,7 @@ class StrataEngine:
                     asked = False
 
                     def ask():        # as give_way above, for the slot this admission reads into
-                        nonlocal asked, voice_stop
+                        nonlocal asked, voice_stop, hold_ok
                         # (not gated on `asked`: #656's BYIELD to a shorter agent turn, which this engine ignores, set it
                         # first and kept the voice STOP from ever going out - a decision waited 40 s behind a 182K read)
                         if (self.VOICE_STOP and not voice_stop and not out and not embeddings and
@@ -2132,6 +2136,7 @@ class StrataEngine:
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")           # (this engine ignores BYIELD: see voice_stop)
                             voice_stop = True
+                            hold_ok = self._read_known_left() >= self.VOICE_STOP_MIN
                             return
                         if (not asked and not embeddings and
                                 ((yields < self.YIELDS_MAX and self._shorter_waiting(len(prompt))) or
@@ -2246,7 +2251,8 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("admission gave way to a voice request")
-                        yield from self._hold_for_voice(cancel, swait[1])
+                        if hold_ok:
+                            yield from self._hold_for_voice(cancel, swait[1])
                         if cancel.is_set():
                             return
                         ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
@@ -2392,7 +2398,7 @@ class StrataEngine:
     VOICE_RECENT_S = 60.0   # without RESERVE_WHILE_VOICE_S: how long after a voice request somebody counts as talking
     VOICE_HOLD_S = 0.0      # "prio_voice_hold_s": an agent read with VOICE_STOP_MIN or more left waits until voice has
                             # been quiet this long (0: off), so a voice decision finds the control lines free
-    VOICE_HOLD_MAX_S = 120.0  # "prio_voice_hold_max_s": ... but never longer than this after the request came in
+    VOICE_HOLD_MAX_S = 300.0  # "prio_voice_hold_max_s": ... but never longer than this after the request came in
 
     def _voice_hold(self, since: float) -> bool:
         """VOICE_HOLD_S: a voice request came in within VOICE_HOLD_S, and the agent request that came in at `since`
@@ -2402,9 +2408,15 @@ class StrataEngine:
         return (PRIO_SCHED and self.VOICE_HOLD_S > 0 and seen is not None and now - seen < self.VOICE_HOLD_S and
                 now - since < self.VOICE_HOLD_MAX_S)
 
+    def _read_known_left(self) -> int:
+        """The prompt tokens the read on the control lines has left by its own PP lines; 0 before the first (a prompt
+        the cache holds all but a few tokens of reads as `unknown: a lot` in _read_left until then)."""
+        p = self.progress
+        return max(0, p[1] - p[0]) if p else 0
+
     def _hold_read(self, tier: int, since: float) -> bool:
-        """An agent's read (T2/T3) under way, its progress known (a PP line), to be STOPped and held for voice."""
-        return tier >= 2 and self.progress is not None and self._voice_hold(since)
+        """An agent's read (T2/T3) with VOICE_STOP_MIN or more known left, to be STOPped and held for voice."""
+        return tier >= 2 and self._read_known_left() >= self.VOICE_STOP_MIN and self._voice_hold(since)
 
     def _hold_for_voice(self, cancel, since: float):
         """(A generator: heartbeats.)  A read STOPped for voice waits, without the control lines, while _voice_hold."""

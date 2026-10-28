@@ -664,6 +664,14 @@ class ParallelService(unittest.TestCase):
             self.assertEqual(len(gens), 2 if hold_max else 1, gens)   # STOPped at its first chunk, then sent again
         self.assertGreaterEqual(took[30.0], 1.5)            # held until voice had been quiet 1.5 s
         self.assertLess(took[0.0], 1.5)                     # held for no longer than allowed: not at all
+        self.engine.VOICE_STOP_MIN = 10 ** 6                # a read with less than that left by its PP lines (a
+        with mock.patch.object(server, "PRIO_SCHED", True), \
+                mock.patch.object(StrataEngine, "VOICE_HOLD_S", 1.5):    # cached prompt): never held
+            self.log.write_text("")
+            self.engine.voice_seen_at = t0 = time.monotonic()
+            self.chat(long_text + " again", max_tokens=16)
+            self.assertLess(time.monotonic() - t0, 1.5)
+        self.assertEqual(len([l for l in self.log.read_text().splitlines() if l.startswith("GEN")]), 1)
         time.sleep(0.3)
         self.assertEqual(self.engine.slot_busy, [False, False])
 
