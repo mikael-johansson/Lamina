@@ -122,19 +122,22 @@ from 2478 to 1439 tok/s.
 |---|---|
 | Control lines free (hold in effect, or nothing reading) | 0.12–0.3 s |
 | A fresh agent read in progress (one 4K chunk + STOP) | ~0.7 s light load, ~2.4 s with two slots decoding |
-| An agent read past the 300 s cap, during continuous talk | ~2.4 s each, until the read is done |
-| First request of a session (a read began in 16K chunks before voice) | up to one 16K chunk, ~5–10 s |
+| An agent read past the 300 s cap, during continuous talk | ~2.4 s each, until the read is done (17:44: ~25 decisions in a row at 2.2–2.5 s) |
+| First request of a session (a read began in 16K chunks before voice) | up to one 16K chunk, ~5–10 s (inferred: the one instance seen, 10.3 s, was a replay warm-up, not a decision) |
 | A restore-heavy agent leg (most of its context from a sibling's cache) | seen 4.5–5.9 s: the STOP landed late (open) |
 
 ## 10. Measurements (voice-lab-74, replay of a real Nova session under the user's Hermes load)
 
 | Setup | Voice decision p50 / p90 | Over 1 s | After 89 s of quiet | Hermes |
 |---|---|---|---|---|
-| (a) 2 slots, 1 reserved for 60 s | 231 / 410 ms | – | 7.1 s | 4.3 req/min during voice |
+| Voice alone, no Hermes load (9c6e6f9f, 14:45): the floor | 184 / 268 ms | 0 of 209 (max 491 ms) | – | – |
+| (a) 2 slots, 1 reserved for 60 s | 231 / 410 ms | 6 of 209 (max 7058 ms) | 7.1 s | 4.3 req/min during voice |
 | (b) 2 slots, none reserved | 250 / 2820 ms | 69 of 209 | – | 8.7 req/min; GPUs idle while reads were held |
 | (c) 3 slots, 1 reserved for 600 s | 204 / 420 ms | 13 of 209 | 1.2 s | short-read wait p50 1.6 s (was 23 s) |
-| (c) + speech 0.3 | 248 / 972 ms | 20 of 209 | – | load rose mid-run; after_reply 0.2–3.4 s (was 3.9–4.7) |
-| (c) + speech, e8d2ea00 | 224 / 759 ms | 17 of 209 | – | short p50 2.1 s |
+| (c) + speech 0.3 | 248 / 972 ms | 20 of 209 | – | load rose mid-run; after_reply 0.18–3.4 s (in (c) the two slow ones were 4.7 and 3.9 s, the rest under 1 s) |
+| (c) + speech, 17:04 (client variant, same requests) | 227 / 1056 ms | 24 of 209 (max 6655 ms: the restore-heavy leg, §9) | – | – |
+| (c) + speech, e8d2ea00, 17:31 | 224 / 759 ms | 17 of 209 | – | short p50 2.1 s |
+| (c) + speech, e8d2ea00, 17:41 (a read past the cap) | 328 / 2739 ms | 48 of 209 (max 4560 ms) | – | short p50 10.7 s |
 
 The user's load varies from run to run, so the Hermes request counts don't compare well across runs.
 
