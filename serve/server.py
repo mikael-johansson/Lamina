@@ -1821,9 +1821,12 @@ class StrataEngine:
             return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
 
     def _slot_turn(self, swait: list) -> bool:
-        """(The caller holds slot_cv.)  No request waiting for a slot comes before this one (`swait`: [tier, arrival];
-        the better tier first, then the earlier): a slot that frees is the first waiter's."""
-        return not any(w is not swait and w < swait for w in self.slot_waiters)
+        """(The caller holds slot_cv.)  No request of a better tier waits for a slot (`swait`: [tier, arrival]): a slot
+        that frees is a voice request's before an agent's.  Within a tier whoever holds the control lines takes it:
+        the lines go short-first, not in arrival order, so an arrival-order turn made the holder give them back and
+        sleep while the slot stayed free and the turn's owner waited for the lines (live: a Hermes request waited 96 s
+        with no slot busy, Hermes TTFT 90 s on 800-token reads)."""
+        return not any(w is not swait and w[0] < swait[0] for w in self.slot_waiters)
 
     def _slot_unwait(self, swait: list) -> bool:
         """(The caller holds slot_cv.)  `swait` out of the slot_waiters; False when it was not there."""

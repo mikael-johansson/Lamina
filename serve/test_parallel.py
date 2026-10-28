@@ -261,6 +261,18 @@ class PickSlot(unittest.TestCase):
         e.slot_group = [0] * n
         return e
 
+    def test_the_slot_turn_puts_voice_first_but_not_one_agent_before_another(self):
+        """A slot that frees goes to a waiting voice request before any agent; between agents, whoever holds the
+        control lines takes it (an older agent waiting for the lines does not keep a free slot idle)."""
+        e = self.engine(2)
+        older_agent, agent, voice = [2.0, 1.0], [2.0, 5.0], [0.0, 9.0]
+        e.slot_waiters = [older_agent, agent]
+        self.assertTrue(e._slot_turn(agent))
+        e.slot_waiters.append(voice)
+        self.assertFalse(e._slot_turn(agent))
+        self.assertFalse(e._slot_turn(older_agent))
+        self.assertTrue(e._slot_turn(voice))
+
     def test_the_reserved_slot_only_while_voice_is_active(self):
         """prio_reserve_while_voice_s: the reserved slot is held back from the agents (T2) only that long after the
         last voice request; without one recently, they have every slot."""
