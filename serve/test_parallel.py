@@ -393,6 +393,38 @@ class ControlOrder(unittest.TestCase):
         self.assertEqual(len(order), 4)
 
 
+    def test_requests_taking_the_lines_again_go_in_arrival_order(self):
+        """PRIORITY_SCHED: agents taking the control lines again (after a voice hold, or a slot wait) go by the
+        request's arrival (`order`), not by whichever thread gets the lock (live 09:37: the main agent, first in, waited
+        behind a later 181K read's 50 s leg)."""
+        import serve.server as server
+        e = StrataEngine("missing-executable", [], lazy=True)
+        e.slot_cv = threading.Condition()
+        e.ctl = server._ControlLines(e.slot_cv)
+        e.waiting, e.wait_lens, e.ctl_epoch = 0, [], 0
+        e.alive = lambda: True
+        got = []
+        def take(name, order):
+            for _ in e._take_control(threading.Event(), 30, priority=0, order=order):
+                pass
+            got.append(name)
+            time.sleep(0.05)
+            e.ctl.release()
+        with mock.patch.object(server, "PRIO_SCHED", True):
+            e.ctl.acquire()
+            ts = [threading.Thread(target=take, args=(n, o)) for n, o in (("third", 3.0), ("first", 1.0), ("second", 2.0))]
+            for t in ts:
+                t.start()
+                time.sleep(0.05)
+            until = time.monotonic() + 5
+            while e.waiting < 3 and time.monotonic() < until:
+                time.sleep(0.01)
+            e.ctl.release()
+            for t in ts:
+                t.join(10)
+        self.assertEqual(got, ["first", "second", "third"])
+
+
 class ParallelService(unittest.TestCase):
     """The real StrataEngine and Service over HTTP, the fake engine behind them."""
 
@@ -674,6 +706,26 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(len([l for l in self.log.read_text().splitlines() if l.startswith("GEN")]), 1)
         time.sleep(0.3)
         self.assertEqual(self.engine.slot_busy, [False, False])
+
+    def test_a_long_agent_read_gives_way_to_another_agent_after_its_slice(self):
+        """prio_agent_slice_s: an agent's long read that has had the control lines that long gives way (STOP) to
+        another agent waiting for them and goes on after it, from the prompt cache."""
+        self.start(2)
+        self.engine.VOICE_STOP_MIN = 0
+        import serve.server as server
+        done_at = {}
+        def go(k, text):
+            self.chat(text, max_tokens=4)
+            done_at[k] = time.monotonic()
+        with mock.patch.object(server, "PRIO_SCHED", True), mock.patch.object(StrataEngine, "AGENT_SLICE_S", 0.2):
+            long_read = threading.Thread(target=go, args=("long", "a long agent context " * 150))
+            long_read.start()
+            time.sleep(0.35)                    # inside its read (~1 s here), past its slice
+            go("short", "a short turn")
+            long_read.join(30)
+        self.assertLess(done_at["short"], done_at["long"])
+        gens = [l for l in self.log.read_text().splitlines() if l.startswith(("GEN", "BGEN"))]
+        self.assertGreaterEqual(len(gens), 3, gens)         # the long read, the short one, the long read again
 
     def test_engine_reports_fewer_slots(self):
         self.start(4, fit=2)
