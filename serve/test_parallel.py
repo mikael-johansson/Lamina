@@ -642,6 +642,31 @@ class ParallelService(unittest.TestCase):
         self.assertIn(f"chunk={StrataEngine.VOICE_CHUNK}", gens[1])
         self.assertNotIn("chunk=", gens[2])
 
+    def test_a_long_read_waits_while_somebody_talks(self):
+        """prio_voice_hold_s: an agent's long read that starts while voice is active is STOPped at its first chunk and
+        goes on only once voice has been quiet that long (so a voice decision finds the control lines free); never
+        longer than prio_voice_hold_max_s after it came in."""
+        self.start(2)
+        self.engine.VOICE_STOP_MIN = 0
+        import serve.server as server
+        long_text = "a long agent context " * 150
+        took = {}
+        for hold_max in (30.0, 0.0):
+            with mock.patch.object(server, "PRIO_SCHED", True), \
+                    mock.patch.object(StrataEngine, "VOICE_HOLD_S", 1.5), \
+                    mock.patch.object(StrataEngine, "VOICE_HOLD_MAX_S", hold_max):
+                self.log.write_text("")
+                self.engine.voice_seen_at = t0 = time.monotonic()
+                r = self.chat(long_text, max_tokens=16)
+                took[hold_max] = time.monotonic() - t0
+            self.assertEqual(r["choices"][0]["message"]["content"], "ok, done.")
+            gens = [l for l in self.log.read_text().splitlines() if l.startswith("GEN")]
+            self.assertEqual(len(gens), 2 if hold_max else 1, gens)   # STOPped at its first chunk, then sent again
+        self.assertGreaterEqual(took[30.0], 1.5)            # held until voice had been quiet 1.5 s
+        self.assertLess(took[0.0], 1.5)                     # held for no longer than allowed: not at all
+        time.sleep(0.3)
+        self.assertEqual(self.engine.slot_busy, [False, False])
+
     def test_engine_reports_fewer_slots(self):
         self.start(4, fit=2)
         self.assertEqual(self.engine.batch, 2)

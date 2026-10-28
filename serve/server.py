@@ -1949,7 +1949,8 @@ class StrataEngine:
 
                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
                         nonlocal reserved, voice_stop
-                        if (self.VOICE_STOP and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                        if (self.VOICE_STOP and not voice_stop and not out and not embeddings and
+                                (self._voice_waiting(tier) or self._hold_read(tier, swait[1])) and
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")
                             voice_stop = True
@@ -2003,6 +2004,9 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("gave way to a voice request")
+                        yield from self._hold_for_voice(cancel, swait[1])
+                        if cancel.is_set():
+                            return
                         ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
                         if not ok:
                             return
@@ -2113,7 +2117,8 @@ class StrataEngine:
                         nonlocal asked, voice_stop
                         # (not gated on `asked`: #656's BYIELD to a shorter agent turn, which this engine ignores, set it
                         # first and kept the voice STOP from ever going out - a decision waited 40 s behind a 182K read)
-                        if (self.VOICE_STOP and not voice_stop and not out and not embeddings and self._voice_waiting(tier) and
+                        if (self.VOICE_STOP and not voice_stop and not out and not embeddings and
+                                (self._voice_waiting(tier) or self._hold_read(tier, swait[1])) and
                                 self._read_left() >= self.VOICE_STOP_MIN):
                             self._send("STOP")           # (this engine ignores BYIELD: see voice_stop)
                             voice_stop = True
@@ -2231,6 +2236,9 @@ class StrataEngine:
                         with self.slot_cv:
                             epoch = self.ctl_epoch
                         btrace("admission gave way to a voice request")
+                        yield from self._hold_for_voice(cancel, swait[1])
+                        if cancel.is_set():
+                            return
                         ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, priority=prio)
                         if not ok:
                             return
@@ -2372,6 +2380,30 @@ class StrataEngine:
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
     VOICE_RECENT_S = 60.0   # without RESERVE_WHILE_VOICE_S: how long after a voice request somebody counts as talking
+    VOICE_HOLD_S = 0.0      # "prio_voice_hold_s": an agent read with VOICE_STOP_MIN or more left waits until voice has
+                            # been quiet this long (0: off), so a voice decision finds the control lines free
+    VOICE_HOLD_MAX_S = 120.0  # "prio_voice_hold_max_s": ... but never longer than this after the request came in
+
+    def _voice_hold(self, since: float) -> bool:
+        """VOICE_HOLD_S: a voice request came in within VOICE_HOLD_S, and the agent request that came in at `since`
+        has not been held VOICE_HOLD_MAX_S yet."""
+        seen = getattr(self, "voice_seen_at", None)
+        now = time.monotonic()
+        return (PRIO_SCHED and self.VOICE_HOLD_S > 0 and seen is not None and now - seen < self.VOICE_HOLD_S and
+                now - since < self.VOICE_HOLD_MAX_S)
+
+    def _hold_read(self, tier: int, since: float) -> bool:
+        """An agent's read (T2/T3) under way, its progress known (a PP line), to be STOPped and held for voice."""
+        return tier >= 2 and self.progress is not None and self._voice_hold(since)
+
+    def _hold_for_voice(self, cancel, since: float):
+        """(A generator: heartbeats.)  A read STOPped for voice waits, without the control lines, while _voice_hold."""
+        if not self._voice_hold(since):
+            return
+        btrace("held for voice")
+        while self._voice_hold(since) and not cancel.is_set():
+            time.sleep(0.25)
+            yield None
 
     def _voice_recent(self) -> bool:
         """A voice request (T0/T1) came in within RESERVE_WHILE_VOICE_S (VOICE_RECENT_S when that is off)."""
@@ -8572,6 +8604,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         StrataEngine.VOICE_PAUSE = False
     if isinstance(cfg.get("prio_voice_chunk"), int) and not isinstance(cfg.get("prio_voice_chunk"), bool):
         StrataEngine.VOICE_CHUNK = max(0, cfg["prio_voice_chunk"])
+    for key, attr in (("prio_voice_hold_s", "VOICE_HOLD_S"), ("prio_voice_hold_max_s", "VOICE_HOLD_MAX_S")):
+        if isinstance(cfg.get(key), (int, float)) and not isinstance(cfg.get(key), bool):
+            setattr(StrataEngine, attr, max(0.0, float(cfg[key])))
     if isinstance(cfg.get("prio_reserve_while_voice_s"), (int, float)) and not isinstance(cfg.get("prio_reserve_while_voice_s"), bool):
         StrataEngine.RESERVE_WHILE_VOICE_S = max(0.0, float(cfg["prio_reserve_while_voice_s"]))
     if "PRIO_SOLO_MAX_TIER" not in os.environ and isinstance(cfg.get("prio_solo_max_tier"), int):
@@ -8582,6 +8617,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
               f"{PRIO_RESERVED_SLOTS} slot(s) reserved" +
               (f" for {StrataEngine.RESERVE_WHILE_VOICE_S:g} s after a voice request" if
                StrataEngine.RESERVE_WHILE_VOICE_S > 0 and PRIO_RESERVED_SLOTS else "") + ")", flush=True)
+        if StrataEngine.VOICE_HOLD_S > 0:
+            print(f"[strata] voice hold: agent reads of {StrataEngine.VOICE_STOP_MIN} tokens or more wait until voice has "
+                  f"been quiet {StrataEngine.VOICE_HOLD_S:g} s (at most {StrataEngine.VOICE_HOLD_MAX_S:g} s)", flush=True)
     if svc.request_log_dir:
         print(f"[strata] request logs: {svc.request_log_dir}", flush=True)
     if svc.api_monitor:
