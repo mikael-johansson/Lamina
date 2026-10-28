@@ -969,11 +969,16 @@ class _ControlLines:
 
     def __init__(self, cv: threading.Condition):
         self._lock, self._cv = threading.Lock(), cv
+        self.owner = None    # the thread holding them (the request whose prompt the engine's PP lines are)
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        return self._lock.acquire(blocking, timeout)
+        ok = self._lock.acquire(blocking, timeout)
+        if ok:
+            self.owner = threading.get_ident()
+        return ok
 
     def release(self) -> None:
+        self.owner = None
         self._lock.release()
         with self._cv:
             self._cv.notify_all()
@@ -5106,7 +5111,12 @@ class Service:
         el = now - s.get("started", now)
         if s.get("first_token") is None:
             pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
-            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
+            ctl = getattr(self.engine, "ctl", None)       # as read (#29); the PP lines are the read on the control
+            if pr and pr[1] and getattr(ctl, "owner", threading.get_ident()) != threading.get_ident():   # lines'
+                print(f"[strata] waiting to read the prompt ({s.get('prompt_tokens', 0):,} tokens): another request's "
+                      f"read, a voice hold or a slot, {el:.0f} s so far", flush=True)
+                return now
+            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"
             print(f"[strata] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
