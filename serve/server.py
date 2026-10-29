@@ -72,6 +72,7 @@ from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve import completions as completions_api  # noqa: E402
+from serve import prefill_progress  # noqa: E402
 from serve import lifeline  # noqa: E402
 from serve import request_log  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
@@ -5684,6 +5685,14 @@ class Service:
                                     first_engine_token_s or 0.0, n,
                                     float(last.get("decode_ms") or 0.0) / 1000,
                                     queue_time=wait_s, e2e_time=el)
+                                # per-call stats (API-PARITY-PLAN 3, rev 3): the same numbers onto
+                                # the /v1/prefill_progress finished entries, keyed by request_id.
+                                prefill_progress.note_finished(
+                                    request_id, prompt_tokens=len(ids), uncached_tokens=uncached,
+                                    completion_tokens=n, prefill_s=pp_ms / 1000,
+                                    ttft_s=first_engine_token_s or 0.0,
+                                    decode_s=float(last.get("decode_ms") or 0.0) / 1000,
+                                    queue_wait_s=wait_s)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "

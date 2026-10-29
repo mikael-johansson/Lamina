@@ -12,6 +12,13 @@ admitted/waiting -> first_token rows, serve/server.py) plus the engine's slot sn
 /slots and /metrics use).  A request is "prefilling" once admitted while its first_token event has not
 fired; the per-request progress inside the prefill (prompt_read of prompt_tokens) comes from the slot row.
 
+per-call stats (ada spec rev 3, the finished half of the contract):
+note_finished(...) is called at the terminal settlement with the same numbers as
+the FINISHED lifecycle log line (serve/lifecycle_log), stamping PP / TG / TTFT /
+queue wait onto a finished-entry list keyed by request_id. payload() appends
+those entries with phase "finished" for FINISHED_TTL_S (PREFILL_PROGRESS_FINISHED_TTL_S,
+as on the vLLM fork) so a client can match its response id after the call ends.
+
 payload() never raises: on any unexpected shape it returns the empty one, so the route cannot 500.
 """
 from __future__ import annotations
@@ -20,7 +27,65 @@ import time
 
 # Read at import, like the vLLM module: the route registration in serve/server.py additionally re-reads
 # the env per request, so flipping it needs no restart of the Python side.
-ENABLED = __import__("os").environ.get("PREFILL_PROGRESS", "0") == "1"
+import os
+
+# Read at import for parity with the vLLM module; both the route registration
+# and note_finished() additionally re-read the env per call, so flipping it
+# needs no restart of the Python side.
+ENABLED = os.environ.get("PREFILL_PROGRESS", "0") == "1"
+
+FINISHED_TTL_S = float(os.environ.get("PREFILL_PROGRESS_FINISHED_TTL_S", 60.0))
+
+# Finished entries keyed by request_id (the response id), value = the vLLM
+# fork's _FINAL_KEYS + prompt_tokens + finished_at. Guarded by its own lock.
+_finished: dict[str, dict] = {}
+_finished_lock = __import__("threading").Lock()
+
+
+def _reset_finished() -> None:
+    """Forget finished entries (tests)."""
+    with _finished_lock:
+        _finished.clear()
+
+
+def note_finished(request_id: str, *, prompt_tokens: int, uncached_tokens: int,
+                  completion_tokens: int, prefill_s: float, ttft_s: float,
+                  decode_s: float, queue_wait_s: float | None = None,
+                  now: float | None = None) -> None:
+    """The finished half of the contract: same inputs as the FINISHED
+    lifecycle line, same derived numbers as vLLM note_finished() — PP over
+    tokens actually computed, TG over first->last token. Never raises.
+    Gated on the env per call, like the route."""
+    if os.environ.get("PREFILL_PROGRESS", "0") != "1" or not request_id:
+        return
+    try:
+        now = time.time() if now is None else now
+        r1 = lambda v, n: round(v, n) if v and v > 0 else None
+        entry = {
+            "request_id": request_id,
+            "phase": "finished",
+            "finished_at": now,
+            "prompt_tokens": int(prompt_tokens),
+            "computed_prompt_tokens": int(uncached_tokens),
+            "completion_tokens": int(completion_tokens),
+            "queue_wait_s": round(queue_wait_s, 3) if queue_wait_s is not None and queue_wait_s >= 0 else None,
+            "ttft_s": r1(ttft_s, 3),
+            "prefill_s": r1(prefill_s, 3),
+            "decode_s": r1(decode_s, 3),
+            "pp_tok_s": (round(uncached_tokens / prefill_s, 1) if prefill_s and prefill_s > 0 else None),
+            "tg_tok_s": (round(completion_tokens / decode_s, 1) if decode_s and decode_s > 0 else None),
+        }
+        with _finished_lock:
+            _finished[request_id] = entry
+            for rid in [k for k, v in _finished.items() if now - v["finished_at"] > FINISHED_TTL_S]:
+                _finished.pop(rid, None)
+    except Exception:
+        pass  # telemetry must never break the serving path
+
+
+def _finished_snapshot(now: float) -> list:
+    with _finished_lock:
+        return [dict(v) for v in _finished.values() if now - v["finished_at"] <= FINISHED_TTL_S]
 
 
 def _ms(since: float | None, now: float) -> int | None:
@@ -104,6 +169,10 @@ def payload(svc) -> dict:
                         req["generated_tokens"] = x.get("generated")
                         break
             reqs.append(req)
+
+        # finished entries (per-call stats): appended after the live ones,
+        # phase "finished" so live consumers skip them; TTL-pruned here too.
+        reqs.extend(_finished_snapshot(now))
 
         running = live_reqs or int(bool(s.get("busy")))
         waiting = int(s.get("queued") or 0) + int(getattr(svc.engine, "waiting", 0) or 0)

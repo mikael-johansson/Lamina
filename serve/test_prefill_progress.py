@@ -161,3 +161,58 @@ class Payload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FinishedStats(unittest.TestCase):
+    """The rev-3 half: note_finished() -> a phase-finished entry in payload(),
+    TTL-pruned, env-gated, keyed by request_id (WebUI matches its response id)."""
+
+    def setUp(self):
+        import serve.prefill_progress as pp
+        self.pp = pp
+        pp._reset_finished()
+        os.environ["PREFILL_PROGRESS"] = "1"
+
+    def tearDown(self):
+        self.pp._reset_finished()
+        os.environ.pop("PREFILL_PROGRESS", None)
+
+    def test_finished_entry_carries_the_stats_keys(self):
+        self.pp.note_finished("chatcmpl-webui.abc-m1-deadbe-1234", prompt_tokens=1000,
+                              uncached_tokens=400, completion_tokens=80, prefill_s=2.5,
+                              ttft_s=3.1, decode_s=4.0, queue_wait_s=0.2)
+        body = self.pp.payload(_Svc())
+        fin = [r for r in body["requests"] if r["phase"] == "finished"]
+        self.assertEqual(len(fin), 1)
+        e = fin[0]
+        self.assertEqual(e["request_id"], "chatcmpl-webui.abc-m1-deadbe-1234")
+        self.assertEqual(e["computed_prompt_tokens"], 400)
+        self.assertEqual(e["completion_tokens"], 80)
+        self.assertAlmostEqual(e["pp_tok_s"], 160.0)
+        self.assertAlmostEqual(e["tg_tok_s"], 20.0)
+        self.assertAlmostEqual(e["queue_wait_s"], 0.2)
+        self.assertAlmostEqual(e["ttft_s"], 3.1)
+
+    def test_live_consumers_skip_finished(self):
+        from serve.prefill_progress import payload
+        self.pp.note_finished("x", prompt_tokens=10, uncached_tokens=10,
+                              completion_tokens=1, prefill_s=0.1, ttft_s=0.2, decode_s=0.1,
+                              queue_wait_s=None)
+        body = payload(_Svc())
+        self.assertTrue(all(r["phase"] != "finished" for r in body["requests"] if r["request_id"] in ("aaa", "bbb", "ccc")))
+
+    def test_env_gate_and_ttl(self):
+        os.environ.pop("PREFILL_PROGRESS", None)
+        self.pp.note_finished("gated", prompt_tokens=1, uncached_tokens=1, completion_tokens=1,
+                              prefill_s=0.1, ttft_s=0.1, decode_s=0.1)
+        os.environ["PREFILL_PROGRESS"] = "1"
+        self.assertNotIn("gated", [r["request_id"] for r in self.pp.payload(_Svc())["requests"]])
+        self.pp.note_finished("ttl", prompt_tokens=1, uncached_tokens=1, completion_tokens=1,
+                              prefill_s=0.1, ttft_s=0.1, decode_s=0.1)
+        with self.pp._finished_lock:
+            self.pp._finished["ttl"]["finished_at"] -= self.pp.FINISHED_TTL_S + 1
+        self.assertNotIn("ttl", [r["request_id"] for r in self.pp.payload(_Svc())["requests"]])
+
+    def test_note_finished_never_raises(self):
+        self.pp.note_finished(None, prompt_tokens="x", uncached_tokens=None, completion_tokens=None,
+                              prefill_s=None, ttft_s=None, decode_s=None)  # no exception
