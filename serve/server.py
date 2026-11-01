@@ -7280,6 +7280,10 @@ def make_handler(svc: Service):
             return self._captured(items, api)
 
         def _captured(self, items, api):
+            calls = {}     # #4: streamed tool calls arrive in pieces (name, then argument fragments): merge them
+            # by index - as openai_collect does for the response - instead of wrapping every piece in its own
+            # "[tool_call: ...]" tag, which made the request log's RESPONSE section a wall of one-token tags.
+            # The whole calls go to record["tool_calls"], the section request_log.finish() was already waiting for.
             try:
                 for item in items:
                     if item is not None:
@@ -7289,11 +7293,16 @@ def make_handler(svc: Service):
                             usage, timings = item.get("usage"), item.get("timings")
                             if item["choices"][0].get("finish_reason"):
                                 self.record["finish_reason"] = item["choices"][0]["finish_reason"]
-                            if delta.get("tool_calls"):
-                                content = (content or "") + "".join(
-                                    f"[tool_call: {(tc.get('function') or {}).get('name') or ''}"
-                                    f"({(tc.get('function') or {}).get('arguments') or ''})]"
-                                    for tc in delta["tool_calls"] if isinstance(tc, dict))
+                            for tc in delta.get("tool_calls") or []:
+                                if not isinstance(tc, dict):
+                                    continue
+                                cur = calls.setdefault(tc.get("index", len(calls)),
+                                                       {"id": None, "type": "function",
+                                                        "function": {"name": "", "arguments": ""}})
+                                cur["id"] = tc.get("id") or cur["id"]
+                                fn = tc.get("function") or {}
+                                cur["function"]["name"] += fn.get("name") or ""
+                                cur["function"]["arguments"] += fn.get("arguments") or ""
                         elif api == "responses":
                             kind = item["type"]
                             content = item["delta"] if kind == "response.output_text.delta" else ""
@@ -7326,6 +7335,12 @@ def make_handler(svc: Service):
                                 self.record["timings"] = timings
                     yield item
             finally:
+                if calls:
+                    finish = self.record.get("finish_reason")
+                    whole = [calls[i] for i in sorted(calls)
+                             if finish == "tool_calls" or _is_json(calls[i]["function"]["arguments"])]
+                    if whole:
+                        self.record["tool_calls"] = whole
                 items.close()
 
         def _completions(self, req):

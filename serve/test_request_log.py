@@ -59,6 +59,36 @@ class RequestLogFiles(unittest.TestCase):
     def test_non_stream(self):
         self.check(False)
 
+    def test_tool_calls_land_whole_in_their_own_section(self):
+        """#4: a streamed tool call arrives in token-sized pieces: the log must show the whole calls under
+        === TOOL CALLS ===, not a [tool_call: ...] wrapper around every piece inside the RESPONSE section."""
+        tok = ByteTokenizer()
+        call = ("Thought.</think>\n\n<tool_call>\n<function=search>\n<parameter=q>\n2+2\n"
+                "</parameter>\n</function>\n</tool_call>")
+        self.svc.engine = MockEngine(tok, call, max_context=16384)
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                for old in Path(self.dir.name).iterdir():       # one_log() wants exactly this request's file
+                    old.unlink()
+                body = {"messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 256, "stream": stream,
+                        "tools": [{"type": "function", "function": {"name": "search", "description": "search",
+                                                                    "parameters": {"type": "object",
+                                                                                   "properties": {"q": {"type":
+                                                                                            "string"}}}}}]}
+                raw = self.post(body).decode()
+                self.assertIn('"finish_reason":"tool_calls"', raw.replace(" ", ""))
+                _, text = self.one_log()
+                self.assertIn("=== TOOL CALLS ===", text)
+                self.assertNotIn("[tool_call", text)
+                section = text.partition("=== TOOL CALLS ===")[2].partition("\n\n")[0]
+                calls = json.loads(section)
+                self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in calls],
+                                 [("search", {"q": "2+2"})])
+                self.assertTrue(all(c["id"] for c in calls))
+                self.assertRegex(text, r"Finish reason +: tool_calls")
+                # the thinking still rides in the RESPONSE section, the call pieces no longer break it up
+                self.assertIn("Thought.", text)
+
 
 if __name__ == "__main__":
     unittest.main()
