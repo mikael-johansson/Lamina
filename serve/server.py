@@ -80,6 +80,7 @@ from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
 from serve import lifecycle_log  # noqa: E402
+from serve import log_color  # noqa: E402
 from serve.session_request_id import session_header_fields, session_request_id  # noqa: E402
 
 IM_END = "<|im_end|>"
@@ -8365,7 +8366,38 @@ class _StampedOut:
         return getattr(self._out, name)
 
 
+class _ColoredOut:
+    """This server's own output with the vLLM console palette on each complete line
+    (serve/log_color.py, issue stack/strata#5): grey time stamp, colored level word.
+    Installed only when color is on (VLLM_LOGGING_COLOR=1 / a TTY), under _StampedOut
+    so it sees the stamped line and can grey the stamp. The engine's log file never
+    goes through this; greps against it are unchanged."""
+    def __init__(self, out):
+        self._out, self._buf = out, ""
+
+    def write(self, s):
+        if not s:
+            return 0
+        self._buf += s
+        lines = self._buf.split("\n")
+        self._buf = lines.pop()                     # a trailing partial line waits for its newline
+        for line in lines:
+            self._out.write(log_color.console_line(line) + "\n")
+        return len(s)
+
+    def flush(self):
+        if self._buf:                               # an unfinished line (no newline): pass it through as it is
+            self._out.write(self._buf)
+            self._buf = ""
+        self._out.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._out, name)
+
+
 def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> int:
+    if log_color.color_enabled() and not isinstance(sys.stdout, _ColoredOut):
+        sys.stdout = _ColoredOut(sys.stdout)
     if os.environ.get("STRATA_LOG_TS", "1") != "0" and not sys.stdout.isatty() and not isinstance(sys.stdout, _StampedOut):
         sys.stdout = _StampedOut(sys.stdout)
     try:                                               # files made by a run as administrator still belong to the user
