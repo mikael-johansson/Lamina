@@ -5112,8 +5112,10 @@ class Service:
         el = now - s.get("started", now)
         if s.get("first_token") is None:
             pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
-            ctl = getattr(self.engine, "ctl", None)       # as read (#29); the PP lines are the read on the control
-            if pr and pr[1] and getattr(ctl, "owner", threading.get_ident()) != threading.get_ident():   # lines'
+            # as read (#29); the PP lines are the read on the control lines'.  Only --batch shares them: a solo
+            ctl = getattr(self.engine, "ctl", None) if getattr(self.engine, "batch", 0) else None   # engine reads
+            # one prompt at a time (self.fifo), so its PP lines are always this request's own.  The ctl exists
+            if pr and pr[1] and getattr(ctl, "owner", threading.get_ident()) != threading.get_ident():   # either way
                 print(f"[strata] waiting to read the prompt ({s.get('prompt_tokens', 0):,} tokens): another request's "
                       f"read, a voice hold or a slot, {el:.0f} s so far", flush=True)
                 return now

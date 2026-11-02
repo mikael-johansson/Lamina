@@ -5628,6 +5628,35 @@ class PromptProgressBatch(unittest.TestCase):
         self.assertIsNone(prompt_progress(svc))
 
 
+class SoloReadOwnsItsProgressLines(unittest.TestCase):
+    """issue #12: the d631f5ca owner check reads engine.ctl.owner even on a SOLO engine (no "parallel").
+    The ctl exists there too (built at engine start whatever --batch says), but nothing ever acquires it
+    - solo requests take the service's fifo, not the control lines - so its owner stayed None and every
+    long solo read printed 'waiting to read the prompt' while the engine read its own prompt."""
+
+    def svc(self, batch, owner):
+        engine = SimpleNamespace(progress=(8192, 87463), batch=batch, ctl=SimpleNamespace(owner=owner))
+        return SimpleNamespace(engine=engine, status_lock=threading.Lock(), status={})
+
+    def line(self, batch, owner):
+        st = {"phase": "reading the prompt", "prompt_tokens": 87463, "generated": 0,
+              "started": time.time() - 3, "first_token": None, "max_tokens": 100}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            Service._progress(self.svc(batch, owner), 0, st=st)
+        return out.getvalue()
+
+    def test_a_solo_read_prints_its_own_progress(self):
+        # batch 0: the ctl exists but no thread ever holds it (owner None): the PP lines are this read's
+        self.assertIn("reading the prompt: 8,192 of 87,463", self.line(0, None))
+
+    def test_a_batch_read_while_another_holds_the_lines_says_waiting(self):
+        self.assertIn("waiting to read the prompt", self.line(3, threading.get_ident() + 1))
+
+    def test_a_batch_read_holding_the_lines_prints_its_own_progress(self):
+        self.assertIn("reading the prompt: 8,192 of 87,463", self.line(3, threading.get_ident()))
+
+
 class VisionArgs(unittest.TestCase):
     """#767: vision.min_tokens reaches the encoder as --min-tokens (mtmd's image_min_tokens)."""
 
