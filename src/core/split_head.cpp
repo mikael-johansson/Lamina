@@ -1,5 +1,6 @@
 // src/core/split_head.cpp - see include/strata/core/split_head.hpp.
 #include "strata/core/split_head.hpp"
+#include "strata/core/capture_gate.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/elementwise.hpp"
@@ -102,6 +103,7 @@ bool SplitHead::init(int device, int main_device, const std::vector<std::string>
 bool SplitHead::capture(int T, bool logits, std::string& err) {
     using namespace strata::kernels;
     if (exec_[T][logits]) return true;
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(s_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "split head: begin capture";
         return false;

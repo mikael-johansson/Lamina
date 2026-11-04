@@ -1,5 +1,6 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/mtp.hpp"
+#include "strata/core/capture_gate.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
@@ -224,7 +225,7 @@ bool MtpDrafter::alloc_state(SessionState& ss, int64_t window, std::string& err,
             return false;
         }
         qsa_state_zero(st_, g, nullptr);
-        cudaDeviceSynchronize();
+        strata::core::device_sync();
         vram_ += sb;
     }
 
@@ -340,7 +341,7 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
             }
             cudaMemcpy(dvocab_, raw.data(), raw.size(), cudaMemcpyHostToDevice);
             strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
-            cudaDeviceSynchronize();
+            strata::core::device_sync();
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
             std::fprintf(stderr, "strata mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
@@ -356,7 +357,7 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
                 }
                 cudaMemset(proxy_scratch_, 0, sb);
                 strata::kernels::draft_proxy_pack(head->type(), dhead_, n_dvocab_, proxy_, nullptr);
-                cudaDeviceSynchronize();
+                strata::core::device_sync();
                 vram_ += pb + sb;
             } else if (copy) {   // a head type or width the copy does not take
                 std::fprintf(stderr, "strata mtp: draft head over %lld tokens: the exact head (no 2-bit copy for it)\n",
@@ -592,6 +593,7 @@ bool MtpDrafter::capture_round(int T, std::string& err) {
     if (round_exec_[T]) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
     bool ok = true;
     // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
@@ -622,6 +624,7 @@ bool MtpDrafter::capture_step(int j, std::string& err) {
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
     const int row = max_t_ + j - 1;
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
     const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
                               {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};

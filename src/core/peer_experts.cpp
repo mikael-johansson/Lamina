@@ -1,5 +1,6 @@
 // src/core/peer_experts.cpp - see include/strata/core/peer_experts.hpp.
 #include "strata/core/peer_experts.hpp"
+#include "strata/core/capture_gate.hpp"
 
 #include "strata/core/device.hpp"   // primary_device() (STRATA_PRIMARY_DEVICE)
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -212,7 +213,7 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
     if (!opened) { err = "peer experts: " + err; close(); return false; }
     // open() zeroes the arena with cudaMemset on the legacy stream, which is not ordered against the non-blocking
     // refill stream: wait for it, or the zeroing can land on top of the fills
-    if (!ck(cudaDeviceSynchronize(), "arena zeroing", err)) { close(); return false; }
+    if (!ck(strata::core::device_sync(), "arena zeroing", err)) { close(); return false; }
     // mapped reads: advise the next kAhead pairs so their reads overlap
     constexpr size_t kAhead = 256;
     const bool advise = src.advise_pairs(pick.data(), (int64_t) std::min(kAhead, pick.size()));

@@ -1,5 +1,6 @@
 // src/core/verify.cpp - see include/strata/core/verify.hpp.
 #include "strata/core/verify.hpp"
+#include "strata/core/capture_gate.hpp"
 #if defined(_WIN32)
 #include <intrin.h>
 #endif
@@ -1147,6 +1148,7 @@ bool Verifier::capture(int T, std::string& err) {
         err = "verify: the profile's stamp buffer does not fit";
         return false;
     }
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "verify: begin capture failed";
         return false;
@@ -1188,6 +1190,7 @@ bool Verifier::capture_commit(std::string& err) {
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
     const int64_t TS = (s.idx_block - 1) * ID;
     const int64_t HS = (int64_t) NG_HIST * NG_HC_DIM;
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "verify: begin commit capture failed";
         return false;

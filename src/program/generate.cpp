@@ -15,6 +15,7 @@
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
 #include "strata/artifact/gguf_split.hpp"
+#include "strata/core/capture_gate.hpp"
 #include "strata/core/adaptive_tier.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/second_gpu.hpp"
@@ -61,6 +62,12 @@
 
 #include <cuda_runtime.h>
 
+#include <cerrno>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include <chrono>
 #include <algorithm>
 #include <iostream>
@@ -974,7 +981,7 @@ void mem_mark(const char* where) {
     cudaMemGetInfo(&free_b, &total_b);
     std::fprintf(stderr, "strata trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
     if (env[0] == '2') {
-        const cudaError_t sync_e = cudaDeviceSynchronize();
+        const cudaError_t sync_e = strata::core::device_sync();
         const cudaError_t last_e = cudaGetLastError();
         std::fprintf(stderr, "strata trace: device %s after %s (sync: %s, last error: %s)\n",
                      sync_e == cudaSuccess && last_e == cudaSuccess ? "ok" : "ERROR", where, cudaGetErrorString(sync_e),
@@ -1084,7 +1091,7 @@ struct SlotLoan {
     bool give_back(strata::core::ExpertSource& src, int64_t n_expert, std::string& err) {
         if (lent.empty()) { free_back(); return true; }
         cudaSetDevice(device);
-        cudaDeviceSynchronize();
+        strata::core::device_sync();
         bool ok = true;
         const auto& lay = strata::kernels::cpu::expert_layout();
         for (const auto& [i, slot] : lent) {
@@ -1311,7 +1318,7 @@ struct PromptBuffers {
                 continue;
             }
             cudaSetDevice(l->device);
-            cudaDeviceSynchronize();   // the prompt path's last use of the slots
+            strata::core::device_sync();   // the prompt path's last use of the slots
             cudaSetDevice(l->main_device);
             std::vector<std::pair<int64_t, int32_t>> empty;
             const auto moves = refill_plan(*l, routed, taken, g->n_expert, src, empty);
@@ -2561,7 +2568,7 @@ int main(int argc, char** argv) {
             }
             if (!auto_cache || attempt >= 6) break;
             cudaMemset(xcache.device_slot(0), 0, (size_t) xcache.bytes());
-            cudaDeviceSynchronize();
+            strata::core::device_sync();
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             const int64_t want = (int64_t) o.vram_reserve_mib << 20;
@@ -2942,7 +2949,7 @@ int main(int argc, char** argv) {
                     return false;
                 }
         }
-        return o.stream_token || cudaDeviceSynchronize() == cudaSuccess;
+        return o.stream_token || strata::core::device_sync() == cudaSuccess;
     };
 
     strata::kernels::SamplerParams sp;
@@ -3180,7 +3187,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: session_replay warm: %s\n", err.c_str());
             return 1;
         }
-        if (cudaDeviceSynchronize() != cudaSuccess) {
+        if (strata::core::device_sync() != cudaSuccess) {
             std::fprintf(stderr, "strata generate: session_replay warm faulted\n");
             return 1;
         }
@@ -3192,7 +3199,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        if (cudaDeviceSynchronize() != cudaSuccess) {
+        if (strata::core::device_sync() != cudaSuccess) {
             std::fprintf(stderr, "strata generate: session_replay faulted: %s\n", cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
@@ -3406,7 +3413,7 @@ int main(int argc, char** argv) {
             // resident when it is first touched): short of it, the cache reopens without its last (empty) slots
             for (int attempt = 0; ok && o.second_gpu_gib <= 0 && attempt < 6; ++attempt) {
                 cudaMemset(gpu2.cache().device_slot(0), 0, (size_t) gpu2.cache().bytes());
-                cudaDeviceSynchronize();
+                strata::core::device_sync();
                 cudaMemGetInfo(&free_b, &total_b);
                 if ((uint64_t) free_b + (64ull << 20) >= reserve) break;
                 std::fprintf(stderr, "strata generate: second GPU: only %lld MiB free once its slots are written "
@@ -3940,10 +3947,10 @@ int main(int argc, char** argv) {
         // slot given up here), and no adaptation round in progress
         auto kv_quiesce = [&] {
             drive.join_adapt();
-            cudaDeviceSynchronize();
+            strata::core::device_sync();
             tier.apply_pending(true);
             tier2.apply_pending(true);
-            cudaDeviceSynchronize();
+            strata::core::device_sync();
         };
         // Room for `cells` cells (rounded up to a step); false: no VRAM is left.
         auto kvg_ensure = [&](int64_t cells) -> bool {
@@ -4013,7 +4020,7 @@ int main(int argc, char** argv) {
             }
             // a device-to-device cudaMemcpy does not wait for the copy: the moves still read the slots given up, and
             // a chunk unmapped under a copy faults it
-            if (gave > 0 && cudaDeviceSynchronize() != cudaSuccess) {
+            if (gave > 0 && strata::core::device_sync() != cudaSuccess) {
                 std::fprintf(stderr, "strata serve: moving experts for the K/V failed: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
@@ -4102,7 +4109,7 @@ int main(int argc, char** argv) {
                     break;
                 }
             }
-            if (cudaDeviceSynchronize() != cudaSuccess) {
+            if (strata::core::device_sync() != cudaSuccess) {
                 std::fprintf(stderr, "strata serve: refilling the expert cache failed: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
@@ -4245,8 +4252,36 @@ int main(int argc, char** argv) {
         std::deque<std::string> in_lines;
         bool in_eof = false;
         std::thread([&] {
-            std::string l;
-            while (std::getline(std::cin, l)) {
+            // read(2) on the descriptor, not std::cin: glibc's exit() flushes every stdio stream and waits for
+            // stdin's lock, which getline holds while it waits for input - an engine ending on an error (every
+            // std::exit) would hang in exit() on Linux, and the server would wait for it forever (upstream's
+            // 87766667, lost here when the fork's merges kept this file; issue #19)
+            std::string l, buf;
+            char chunk[4096];
+            auto getline_fd = [&](std::string& out) -> bool {
+                for (;;) {
+                    const size_t nlpos = buf.find('\n');
+                    if (nlpos != std::string::npos) {
+                        out.assign(buf, 0, nlpos);
+                        buf.erase(0, nlpos + 1);
+                        return true;
+                    }
+#if defined(_WIN32)
+                    const int n = _read(0, chunk, (unsigned) sizeof chunk);
+#else
+                    const ssize_t n = ::read(0, chunk, sizeof chunk);
+                    if (n < 0 && errno == EINTR) continue;
+#endif
+                    if (n <= 0) {
+                        if (buf.empty()) return false;
+                        out.swap(buf);
+                        buf.clear();
+                        return true;
+                    }
+                    buf.append(chunk, (size_t) n);
+                }
+            };
+            while (getline_fd(l)) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
                 if (l == "STOP") { stop_req.store(true); continue; }
                 if (l.rfind("BSTOP ", 0) == 0) {   // a slot ends at its next window
@@ -4281,7 +4316,7 @@ int main(int argc, char** argv) {
             for (const int d : {o.main_gpu, o.second_gpu})
                 if (d >= 0) {
                     cudaSetDevice(d);
-                    cudaDeviceSynchronize();
+                    strata::core::device_sync();
                 }
             cudaSetDevice(o.main_gpu);
             // the CPU's experts the most routed lately first (the tiers' counts), the profile's order between equals
@@ -5005,9 +5040,9 @@ int main(int argc, char** argv) {
             cudaSetDevice(dev2);                                              // slots reach into its neighbours')
             const cudaError_t pre2 = cudaGetLastError();
             const cudaError_t m2 = cudaMemset(p2, 0, (size_t) n2);
-            const cudaError_t s2 = cudaDeviceSynchronize();
+            const cudaError_t s2 = strata::core::device_sync();
             cudaSetDevice(o.main_gpu);
-            const cudaError_t s1 = cudaDeviceSynchronize();
+            const cudaError_t s1 = strata::core::device_sync();
             if (m1 == cudaSuccess && m2 == cudaSuccess && s1 == cudaSuccess && s2 == cudaSuccess) return true;
             // what failed, where, and against which cache bounds; the errors cleared (a later kernel's check() reads
             // cudaGetLastError and took this one for its own: "prefill q8_to_bf16: invalid argument", 10:49 live) and
@@ -5292,7 +5327,7 @@ int main(int argc, char** argv) {
                     for (int64_t c = n; ve.empty() && c < cells; ++c) put(c, p + (c - n), p + (c - n), p + (c - n));
                 }
                 tr("positions built", (long long) img_rows.size());
-                cudaDeviceSynchronize();
+                strata::core::device_sync();
                 tr("device idle");
                 if (ve.empty() && !mrope_upload()) ve = "the image position upload failed";
                 if (!ve.empty()) {
@@ -6151,7 +6186,7 @@ int main(int argc, char** argv) {
         // memory access" at a plane offset that has nothing to do with the fault, and the layer that actually
         // faulted had completed its own error checks successfully - because its kernels had not run yet.  A
         // sticky error surfaces at the next SYNCHRONISING call, which is whatever happens to come next.
-        if (!o.stream_token && cudaDeviceSynchronize() != cudaSuccess) {
+        if (!o.stream_token && strata::core::device_sync() != cudaSuccess) {
             std::fprintf(stderr, "strata generate: the device faulted in lm_head at position %lld: %s\n",
                          (long long) pos, cudaGetErrorString(cudaGetLastError()));
             return 1;

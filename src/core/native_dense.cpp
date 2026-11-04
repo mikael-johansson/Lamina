@@ -1,4 +1,5 @@
 #include "strata/core/native_dense.hpp"
+#include "strata/core/capture_gate.hpp"
 #include "strata/core/weights.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -91,7 +92,7 @@ bool upload_parallel(const std::vector<Upload>& jobs, std::string& err) {
     worker();
     for (auto& th : pool) th.join();
     // the tails' memsets, on the legacy stream beside the workers' non-blocking ones, landed too
-    if (const cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) fail(e);
+    if (const cudaError_t e = strata::core::device_sync(); e != cudaSuccess) fail(e);
     if (bad) {
         err = std::string("native dense upload: ") + cudaGetErrorString((cudaError_t) first_err.load());
         return false;

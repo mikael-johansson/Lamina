@@ -1,5 +1,6 @@
 // src/core/second_gpu.cpp - see include/strata/core/second_gpu.hpp.
 #include "strata/core/second_gpu.hpp"
+#include "strata/core/capture_gate.hpp"
 
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/elementwise.hpp"
@@ -203,6 +204,7 @@ bool SecondGpu::graph_for(int gu_type, int d_type, int gu_act, int d_act, int gr
     const auto* pi = (const int32_t*) d_plan_;
     const auto* p64 = (const unsigned long long*) (pi + P.ptr);
     cudaGraph_t graph = nullptr;
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(s_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "second GPU: cannot capture";
         return false;

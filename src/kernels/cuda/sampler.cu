@@ -20,6 +20,7 @@
 //   - `sampler_kernel` (`STRATA_OLD_SAMPLER=1`), the kernel of engine 0.1.20, kept as the reference.
 // The two new ones share `sampled_tail_warp` (top_p / min_p / temperature / draw on one warp).
 #include "strata/kernels/sampler.hpp"
+#include "strata/core/capture_gate.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/core/emulate.hpp"
@@ -1294,7 +1295,7 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
         std::fprintf(stderr, "sample_tokens launch: %s\n", cudaGetErrorString(e));
         std::exit(1);
     }
-    if (stream == nullptr) cudaDeviceSynchronize();
+    if (stream == nullptr) strata::core::device_sync();
 }
 
 namespace {
@@ -1365,7 +1366,7 @@ bool sample_tokens_spec(const float* logits, int n_tokens, int n_vocab, const in
         std::fprintf(stderr, "sample_tokens_spec launch: %s\n", cudaGetErrorString(e));
         std::exit(1);
     }
-    if (stream == nullptr) cudaDeviceSynchronize();
+    if (stream == nullptr) strata::core::device_sync();
     return true;
 }
 

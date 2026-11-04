@@ -1,6 +1,7 @@
 
 // src/core/layer.cpp - the GDN layer, composed.  See the header for the operation order and its traps.
 #include "strata/core/layer.hpp"
+#include "strata/core/capture_gate.hpp"
 #include "strata/core/native_head.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
@@ -613,7 +614,7 @@ int64_t qsa_kv_elastic_need(int64_t cells) {
 bool qsa_kv_elastic_grow(int64_t cells, const std::function<VmmChunk()>& take) {
     for (auto& p : g_pools)
         if (!p->frozen && !pool_grow(*p, cells, take)) return false;
-    return cudaDeviceSynchronize() == cudaSuccess;
+    return strata::core::device_sync() == cudaSuccess;
 }
 int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>& give) {
     const uint64_t G = vmm_granularity();
@@ -1018,7 +1019,7 @@ static void st_end(int64_t layer, int slot, void* stream) {
 
 void stage_timing_report(int64_t n_layers) {
     if (!g_st.on) return;
-    cudaDeviceSynchronize();
+    strata::core::device_sync();
     double tot[STAGE_SLOTS] = {};
     for (int s = 0; s < g_st.nslots; ++s) {
         for (int64_t l = 0; l < n_layers && l < 64; ++l) {

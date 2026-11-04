@@ -1,5 +1,6 @@
 // src/core/decode_split.cpp - see include/strata/core/decode_split.hpp.
 #include "strata/core/decode_split.hpp"
+#include "strata/core/capture_gate.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/layer.hpp"
@@ -7,6 +8,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 
 namespace strata::core {
@@ -26,7 +28,7 @@ struct OnDevice {
 DecodeSplit::~DecodeSplit() {
     if (dev_ < 0) return;
     OnDevice on(dev_);
-    cudaDeviceSynchronize();
+    strata::core::device_sync();
     if (weights_) cudaFree(weights_);
     if (state_) cudaFree(state_);
 }
@@ -139,7 +141,7 @@ bool DecodeSplit::init(const WeightTable& wt, const ModelGeometry& g, SessionSta
         err = "--decode-split: the head: " + err;
         return false;
     }
-    if (cudaDeviceSynchronize() != cudaSuccess) {
+    if (strata::core::device_sync() != cudaSuccess) {
         err = std::string("--decode-split: ") + cudaGetErrorString(cudaGetLastError());
         return false;
     }
@@ -218,7 +220,7 @@ bool make_range_session(const ModelGeometry& g, int64_t cells, int64_t lo, int64
     out.qsa_states = qsa.data();
     out.k = k;
     out.max_cells = cells;
-    return cudaDeviceSynchronize() == cudaSuccess;
+    return strata::core::device_sync() == cudaSuccess;
 }
 
 bool DecodeSplit::make_session(SessionState& out, std::vector<QsaState>& qsa, void*& mem, std::string& err,
@@ -252,7 +254,10 @@ void DecodeSplit::zero() {
     OnDevice on(dev_);
     cudaMemset(ss2_.gdn_state, 0, (size_t) gdn_count_ * gdn_state_floats(*g_) * 4);
     for (const QsaState& q : qsa2_) qsa_state_zero(q, *g_, nullptr);
-    cudaDeviceSynchronize();
+    if (const cudaError_t e = strata::core::device_sync(); e != cudaSuccess) {   // no sequence starts on the last one's state
+        std::fprintf(stderr, "--decode-split: zeroing the second GPU's state: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 bool DecodeSplit::copy_out(int64_t c0, int64_t c1, std::string& err) { return copy_state(c0, c1, false, err); }

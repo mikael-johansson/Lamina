@@ -1,5 +1,6 @@
 // src/core/prompt_cache.cpp - the --serve prompt cache (see include/strata/core/prompt_cache.hpp).
 #include "strata/core/prompt_cache.hpp"
+#include "strata/core/capture_gate.hpp"
 
 #include "strata/kernels/qsa.hpp"
 
@@ -335,7 +336,7 @@ void PromptCache::checkpoint(int64_t pos, bool roll) {
     }
     void* h = take_buffer(pos);
     if (h == nullptr) return;
-    cudaDeviceSynchronize();
+    strata::core::device_sync();
     const bool split = split_from > 0 && split_save;
     const int64_t here = split ? split_from : second_from > 0 ? second_from : g_.n_layers;   // this session's layers
     if (!(here < g_.n_layers ? session_ckpt_save_layers(ss_, g_, pos, h, stream_, 0, here, 0)

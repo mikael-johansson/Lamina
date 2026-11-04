@@ -1,5 +1,6 @@
 // src/core/session.cpp - one token through all 48 layers.  See the header for why the graphs are per-layer.
 #include "strata/core/session.hpp"
+#include "strata/core/capture_gate.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/core/layout.hpp"
 
@@ -387,6 +388,7 @@ bool session_capture(const WeightTable& tables, const ModelGeometry& g, SessionS
                 err = std::string("session_capture: stream create failed");
                 return false;
             }
+            strata::core::CaptureHold capture_hold;
             if (cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
                 err = "session_capture: begin failed at layer " + std::to_string(l);
                 return false;
@@ -1011,6 +1013,7 @@ bool session_capture_token(const WeightTable& tables, const ModelGeometry& g, Se
     }
     cudaStream_t cs = nullptr;
     if (cudaStreamCreate(&cs) != cudaSuccess) { err = "session_capture_token: stream create failed"; return false; }
+    strata::core::CaptureHold capture_hold;
     if (cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         cudaStreamDestroy(cs);
         err = "session_capture_token: begin capture failed";
