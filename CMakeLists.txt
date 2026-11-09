@@ -285,10 +285,16 @@ if(STRATA_ENABLE_CUDA)
   # the prompt cache's checkpoint retention (spread_victim) against least recent use (CPU only)
   add_executable(prompt_cache_spread_test tests/core/prompt_cache_spread_test.cpp)
   target_link_libraries(prompt_cache_spread_test PRIVATE strata_engine)
+  # #19: the capture gate's exclusion contract - captures share it, a device-wide wait holds it alone.  Host-only:
+  # it drives the lock, launches no CUDA work; CUDA::cudart is for cudaGetDevice, as in the other host tests.
+  add_executable(capture_gate_test tests/core/capture_gate_test.cpp)
+  target_include_directories(capture_gate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(capture_gate_test PRIVATE CUDA::cudart)
   if(STRATA_BUILD_TESTS)
     add_test(NAME expert_profile_save_test COMMAND expert_profile_save_test)
     add_test(NAME prompt_cache_spread_test COMMAND prompt_cache_spread_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
+    add_test(NAME capture_gate_test COMMAND capture_gate_test)
     add_test(NAME deterministic_adapt_help COMMAND strata --deterministic-adapt --help)
     set_tests_properties(deterministic_adapt_help PROPERTIES
                          PASS_REGULAR_EXPRESSION "--deterministic-adapt")
