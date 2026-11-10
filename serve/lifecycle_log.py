@@ -2,12 +2,12 @@
 (API-PARITY-PLAN.md section 10), ported near-verbatim from the vLLM fork's
 v1/engine/request_lifecycle_log.py (patches/request-lifecycle-log-timings.patch
 and request-lifecycle-log-request-colors.patch), so one
-`journalctl -o cat | grep 'chatcmpl-webui.0580615c'` works across both
+`journalctl -o cat | grep 'chat.webui.0580615c'` works across both
 backends:
 
-    NEW REQUEST chatcmpl-webui.0580615c1c52-m87-3fa2c1-9e81: 83746 prompt tokens
-    ADMITTED    chatcmpl-webui.0580615c1c52-m87-3fa2c1-9e81: 83746 prompt, 97.5% cached (cached 81746), 2000 to compute, waited 0.4s
-    FINISHED    chatcmpl-webui.0580615c1c52-m87-3fa2c1-9e81: 83746 prompt, WAIT: 0.4s, PP: 7.3s (2000 tokens 273.9 PPtok/s) TTFT: 7.5s, GEN: 237 tokens in 2.7s (87.5 tok/s). E2E: 10.2s
+    NEW REQUEST chat.webui.0580615c1c52-m87-3fa2c1-9e81: 83746 prompt tokens
+    ADMITTED    chat.webui.0580615c1c52-m87-3fa2c1-9e81: 83746 prompt, 97.5% cached (cached 81746), 2000 to compute, waited 0.4s
+    FINISHED    chat.webui.0580615c1c52-m87-3fa2c1-9e81: 83746 prompt, WAIT: 0.4s, PP: 7.3s (2000 tokens 273.9 PPtok/s) TTFT: 7.5s, GEN: 237 tokens in 2.7s (87.5 tok/s). E2E: 10.2s
 
 NEW REQUEST prints as soon as the request enters the engine queue (prompt
 tokens known from the tokenized ids); ADMITTED at the terminal_requests

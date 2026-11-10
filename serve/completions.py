@@ -95,7 +95,7 @@ def parse(req: dict, tok, vocab_size: int | None, max_context: int) -> dict:
             "stream": bool(req.get("stream"))}
 
 
-def run(svc, p: dict, cancel, beat_s: float):
+def run(svc, p: dict, cancel, beat_s: float, rid: str | None = None):
     """Yields ("ping", None) while queued or while the engine is quiet, ("token", id) per generated token, then
     ("done", {"finish", "stop_reason", "completion_tokens", "prompt_tokens", "cached", "scores"}); the stop token
     counts in completion_tokens but is not yielded.  One request at a time: holds the engine's turn (svc.fifo) from
@@ -120,8 +120,13 @@ def run(svc, p: dict, cancel, beat_s: float):
         eng = svc.engine
         stops = p["stop_ids"] | set(getattr(svc, "stop_ids", ()) or ())
         n, finish, stop_reason = 0, "length", None
-        # the lifecycle lines (serve/lifecycle_log.py) the chat routes print from Service.run, which this route skips
-        rid = "cmpl-" + uuid.uuid4().hex[:12]
+        # the lifecycle lines (serve/lifecycle_log.py) the chat routes print from Service.run, which this route
+        # skips; request-id v2 (issue #26): the id is the one responses() answers with -- the thread-local
+        # cmpl.<client>.<session>[.sub]-<rand4> (or cmpl.plain.<12hex>) the handler minted from the tag headers --
+        # so the lifecycle lines, the /api/requests record and the response id all carry the same id. A call
+        # without a handler keeps a plain cmpl- id.
+        rid = (rid or getattr(svc.request_trace, "tagged_id", None)
+               or "cmpl-" + uuid.uuid4().hex[:12])
         t0, t_first = time.monotonic(), None
         lifecycle_log.log_new_request(rid, len(p["ids"]))
         gen = eng.generate(p["ids"], p["max_new"], p["sampling"], cancel)
@@ -193,7 +198,10 @@ def responses(svc, p: dict, cancel, beat_s: float, model: str):
     """The OpenAI/vLLM completion objects: the whole one (not streaming), or the stream's chunks (None = a keep-alive,
     the last chunk carries finish_reason, stop_reason and usage)."""
     from serve.server import Detokenizer, QueueCancelled
-    cid, created = "cmpl-" + uuid.uuid4().hex[:24], int(time.time())
+    # request-id v2 (issue #26): response id == log id -- the thread-local id the handler minted for
+    # this request (begin_request set it before dispatch; untagged -> cmpl.plain.<12hex>).
+    cid = getattr(svc.request_trace, "tagged_id", None) or "cmpl-" + uuid.uuid4().hex[:24]
+    created = int(time.time())
     def obj(text, finish=None, stop_reason=None, logprobs=None, use=None):
         o = {"id": cid, "object": "text_completion", "created": created, "model": model,
              "choices": [{"index": 0, "text": text, "logprobs": logprobs, "finish_reason": finish,
@@ -203,7 +211,7 @@ def responses(svc, p: dict, cancel, beat_s: float, model: str):
         return o
     detok, text, done = Detokenizer(svc.tok), [], None
     try:
-        for kind, value in run(svc, p, cancel, beat_s):
+        for kind, value in run(svc, p, cancel, beat_s, rid=cid):
             if kind == "ping":
                 if p["stream"]:
                     yield None

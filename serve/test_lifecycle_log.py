@@ -111,7 +111,7 @@ class Colors(unittest.TestCase):
         self.assertNotIn("\x1b[33m", out)
 
     def test_per_request_color_by_session(self):
-        h = {"X-Hermes-Session": "0580615c1c52"}
+        h = {"X-Session-Id": "0580615c1c52"}
         from serve.session_request_id import session_request_id
         from email.message import Message
 
@@ -122,7 +122,7 @@ class Colors(unittest.TestCase):
             return m
 
         msgs = [{"role": "user", "content": "q"}]
-        ids = [f"chatcmpl-{session_request_id(hdrs({**h, 'X-Hermes-Client': c}), {'messages': msgs})}"
+        ids = [session_request_id(hdrs({**h, "X-Client-Name": c}), {"messages": msgs})
                for c in ("webui", "aux")]
         colors = {self.mod._req(i).split("m", 1)[0] for i in ids}
         self.assertEqual(len(colors), 1, colors)               # one session, one color
@@ -161,7 +161,7 @@ class ThroughRun(unittest.TestCase):
     def test_lines_carry_the_tagged_id(self):
         import threading
         svc, tok = self._svc()
-        tag = "webui.0580615c1c52-m4-3fa2c1-9e81"
+        tag = "chat.webui.0580615c1c52-m4-3fa2c1-9e81"   # v2: the thread-local carries the whole id
         svc.request_trace.tagged_id = tag
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -169,7 +169,7 @@ class ThroughRun(unittest.TestCase):
                 pass
         svc.request_trace.tagged_id = None
         lines = out.getvalue().splitlines()
-        want = f"chatcmpl-{tag}"
+        want = tag
         new = [l for l in lines if l.startswith("NEW REQUEST")]
         adm = [l for l in lines if l.startswith("ADMITTED")]
         fin = [l for l in lines if l.startswith("FINISHED")]
@@ -179,7 +179,7 @@ class ThroughRun(unittest.TestCase):
         for l in new + adm + fin:
             self.assertIn(want, l)
         # the MockEngine keeps no clock: PP/GEN times are 0.0s, "?" rates
-        self.assertRegex(fin[0], r"FINISHED chatcmpl-webui\.0580615c1c52-m4-3fa2c1-9e81: \d+ prompt, "
+        self.assertRegex(fin[0], r"FINISHED chat\.webui\.0580615c1c52-m4-3fa2c1-9e81: \d+ prompt, "
                                   r"WAIT: \d+\.\ds, PP: 0\.0s \(\d+ tokens [?0-9.]* PPtok/s\) "
                                   r"TTFT: \d+\.\ds, GEN: \d+ tokens in 0\.0s \(\? tok/s\)\. E2E: \d+\.\ds")
 

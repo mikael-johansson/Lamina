@@ -81,7 +81,8 @@ from serve.responses import ResponsesError, error_body as responses_error_body  
 from serve import images as images_api  # noqa: E402
 from serve import lifecycle_log  # noqa: E402
 from serve import log_color  # noqa: E402
-from serve.session_request_id import session_header_fields, session_request_id  # noqa: E402
+from serve.session_request_id import (completions_request_id, session_header_fields,  # noqa: E402
+                                        session_request_id)
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -4592,15 +4593,22 @@ class Service:
 
     def begin_request(self, path, req, headers=None):
         """#332: a monitor record for this request, or None when neither the monitor nor the request logs are on.
-        session-tags (API-PARITY-PLAN 2): with X-Hermes-Session/-Client headers the id becomes
-        chatcmpl-<client>.<session>-m<n>-<hash6>-<rand4>; the thread-local copy lets the run path and the chat
-        response id use the same tag, and the sanitized header fields ride in the record (plan section 6)."""
-        tagged = session_request_id(headers, req) if headers is not None else None
+        request-id v2 (issue #26): with X-Client-Name/X-Session-Id (or legacy X-Hermes-*) headers the id is
+        chat.<client>.<session>[.sub<path>]-m<n>-<hash6>-<rand4> (chat family) or
+        cmpl.<client>.<session>[.sub<path>]-<rand4> (/v1/completions); untagged requests get chat.plain /
+        cmpl.plain ids. The thread-local copy lets the run path and the response id use the same id (response
+        id == log id), and the sanitized header fields ride in the record."""
+        if headers is None:
+            tagged = None
+        elif path == "/v1/completions":
+            tagged = completions_request_id(headers)
+        else:
+            tagged = session_request_id(headers, req)
         self.request_trace.tagged_id = tagged
         if not self.api_monitor and not self.request_log_dir:
             return None
         raw = json.dumps(req, ensure_ascii=False, indent=2) if self.api_monitor else ""
-        record = {"id": f"chatcmpl-{tagged}" if tagged else uuid.uuid4().hex[:12],
+        record = {"id": tagged or uuid.uuid4().hex[:12],
                   "path": path, "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
@@ -5225,15 +5233,14 @@ class Service:
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
         request_id = uuid.uuid4().hex[:12]
-        # session-tags (API-PARITY-PLAN 2): the run's id is the thread-local tagged id when the
-        # handler read X-Hermes-Session/-Client headers, so /api/requests, the terminal events and
-        # the lifecycle lines all carry the same greppable tag; untagged (and a direct svc.run()
-        # without a handler) keeps the plain 12-hex. The handler's finally clears the thread-local,
-        # so every run of one API request (an MCP round) shares one tag and no later request
-        # inherits it.
+        # request-id v2 (issue #26): the run's id is the thread-local v2 id the handler minted
+        # (chat.<client>.<session>... or chat.plain.<12hex>), so /api/requests, the terminal events,
+        # the lifecycle lines and the response id all carry the same greppable id. A direct svc.run()
+        # without a handler keeps the plain 12-hex. The handler's finally clears the thread-local, so
+        # every run of one API request (an MCP round) shares one id and no later request inherits it.
         tagged = getattr(self.request_trace, "tagged_id", None)
         if tagged:
-            request_id = f"chatcmpl-{tagged}"
+            request_id = tagged
         setattr(cancel, "_strata_request_id", request_id)
         deadline = time.monotonic() + self.queue_timeout_s if self.queue_timeout_s is not None else None
         if deadline is not None:
@@ -5995,10 +6002,11 @@ def prompt_progress(svc: Service):
 def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None, force=None):
     """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
     an empty delta and a `strata_mcp` field, which only the web app reads.  `force`: see Service.run."""
-    # session-tags (API-PARITY-PLAN 2): with the X-Hermes-* headers the response id carries the
-    # same tag as the internal request id, the /api/requests record and the lifecycle lines.
+    # request-id v2 (issue #26): the response id is the same id as the internal request id, the
+    # /api/requests record and the lifecycle lines (no chatcmpl- wrapper); a run without a handler's
+    # thread-local mints its own chat.plain id.
     tagged = getattr(svc.request_trace, "tagged_id", None)
-    cid = f"chatcmpl-{tagged}" if tagged else "chatcmpl-" + uuid.uuid4().hex[:24]
+    cid = tagged or "chat.plain." + uuid.uuid4().hex[:12]
     created = int(time.time())
     model = svc.model_for(req)
     # llama.cpp's flag, and its default: a client that wants prompt progress asks for it, and nothing changes for one
@@ -6985,7 +6993,7 @@ def make_handler(svc: Service):
                     self.record = svc.begin_request(path, req, self.headers)
                     if svc.request_log_dir and path != "/v1/choose" and self.record is not None:
                         try:
-                            tagged = self.record["id"] if self.record["id"].startswith("chatcmpl-") else None
+                            tagged = self.record["id"] if self.record["id"].startswith(("chat.", "cmpl.")) else None
                             self.record["_log"] = request_log.RequestLog(svc.request_log_dir, path, req, self.headers,
                                                                          self.client_address[0], tagged)
                         except Exception as e:                # logging must never fail a request

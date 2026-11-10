@@ -40,7 +40,7 @@ class RequestLogFiles(unittest.TestCase):
                              {"role": "user", "content": "hi"}], "max_tokens": 64, "stream": stream}
         self.post(body)
         name, text = self.one_log()
-        self.assertRegex(name, r"^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\dZ_chatcmpl-[0-9a-f]+_SYSTEM_You_are_Hermes_Agent")
+        self.assertRegex(name, r"^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\dZ_chat\.plain\.[0-9a-f]{12}_SYSTEM_You_are_Hermes_Agent")
         self.assertNotIn("sekrit", text)
         for section in ("=== HEADERS ===", "=== REQUEST ===", "=== RESPONSE (streaming) ===", "=== PERFORMANCE ==="):
             self.assertIn(section, text)

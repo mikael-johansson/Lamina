@@ -128,6 +128,28 @@ class Completions(unittest.TestCase):
         self.assertEqual(s, 200, b)
         self.assertEqual(self.engine.calls[-1][2], {"logit_bias": {str(A): -100}, "priority": -10})
 
+    def test_response_id_is_the_v2_cmpl_id(self):
+        """request-id v2 (issue #26): the response id is the minted cmpl id, not a cmpl-<24hex>: untagged
+        -> cmpl.plain.<12hex>; with the tag headers (new names) -> cmpl.<client>.<session>-<nonce4>."""
+        s, b = self.post({"prompt": [1], "max_tokens": 2})
+        self.assertEqual(s, 200, b)
+        self.assertRegex(b["id"], r"^cmpl\.plain\.[0-9a-f]{12}$")
+        req = urllib.request.Request(self.base + "/v1/completions",
+                                     data=json.dumps({"prompt": [1], "max_tokens": 2}).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "X-Client-Name": "nova-decide", "X-Session-Id": "conv42"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            b = json.loads(r.read().decode())
+        self.assertRegex(b["id"], r"^cmpl\.nova-decide\.conv42-[0-9a-f]{4}$")
+        # legacy header names keep working during the migration
+        req = urllib.request.Request(self.base + "/v1/completions",
+                                     data=json.dumps({"prompt": [1], "max_tokens": 2}).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "X-Hermes-Client": "nova-reply", "X-Hermes-Session": "conv43"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            b = json.loads(r.read().decode())
+        self.assertRegex(b["id"], r"^cmpl\.nova-reply\.conv43-[0-9a-f]{4}$")
+
     def test_bad_requests_are_400(self):
         for body in ({"prompt": []}, {"prompt": [1], "max_tokens": 0}, {"prompt": [1], "n": 2},
                      {"prompt": [1], "ignore_eos": True}, {"prompt": [1], "max_tokens": 2, "allowed_token_ids": [A]},
