@@ -1084,7 +1084,8 @@ class StrataEngine:
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE if ts_log else self.log, text=True,
                           encoding="utf-8", bufsize=1, env=env, **pin)
         if ts_log:
-            threading.Thread(target=_stamp_lines, args=(self.proc.stderr, self.log), daemon=True).start()
+            threading.Thread(target=_stamp_lines, args=(self.proc.stderr, self.log, self._steps_echo),
+                             daemon=True).start()
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
         ready_q: queue.Queue = queue.Queue()
@@ -1223,6 +1224,19 @@ class StrataEngine:
         self.wlock = threading.Lock()                   # stdin writes from several request threads
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
+
+    STEPS_PREFIX = "strata steps: "
+
+    def _steps_echo(self, line: str) -> None:
+        """STRATA_STEP_BREAKDOWN: the engine's "strata steps:" lines (where its time went, every 10 s) on the console
+        too, next to the FINISHED lines, as vLLM's status lines are; the status line gets the queue only the server
+        sees: WAITING = the requests waiting for the control lines or for a batch slot."""
+        if not line.startswith(self.STEPS_PREFIX):
+            return
+        body = line[len(self.STEPS_PREFIX):].rstrip("\r\n")
+        if "RUNNING:" in body:
+            body += ", WAITING: %d reqs" % (self.__dict__.get("waiting", 0) + self.__dict__.get("admitting", 0))
+        print("[strata] " + body, flush=True)
 
     def _pump(self):
         proc, lines = self.proc, self.lines             # this process's: a restart replaces both (#344)
@@ -8336,8 +8350,9 @@ def _stamp(line):
     return f"{time.strftime('%H:%M:%S', time.localtime(t))}.{int(t * 1000) % 1000:03d} {line}"
 
 
-def _stamp_lines(src, dst):
-    """The engine's stderr into its log, each line with the time it came (a stall then lines up with the clients')."""
+def _stamp_lines(src, dst, echo=None):
+    """The engine's stderr into its log, each line with the time it came (a stall then lines up with the clients').
+    `echo`: called with each line too (the step breakdown's lines go to the console as well)."""
     try:
         for line in src:
             try:
@@ -8345,6 +8360,11 @@ def _stamp_lines(src, dst):
                 dst.flush()
             except (OSError, ValueError):
                 pass
+            if echo is not None:
+                try:
+                    echo(line)
+                except Exception:
+                    pass
     except (OSError, ValueError):
         pass
 

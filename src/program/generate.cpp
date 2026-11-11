@@ -51,6 +51,7 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/prompt_cache.hpp"
+#include "strata/core/step_breakdown.hpp"
 #include "strata/prefill/experts.hpp"
 #include "strata/prefill/prefill.hpp"
 #include "strata/prefill/split.hpp"
@@ -843,6 +844,48 @@ struct BatchSlot {
     Clock::time_point t0;
 };
 
+/// STRATA_STEP_BREAKDOWN=1 (core/step_breakdown.hpp): where the serve engine's time went, every 10 s (=N: every N s),
+/// as "strata steps:" lines on stderr.  One ledger behind one mutex for the main thread and the slots' stage threads
+/// (events are per read chunk and per decode window, ms apart); null when off: each hook is one pointer test.
+struct StepLedger {
+    std::mutex mu;
+    Clock::time_point t0 = Clock::now();
+    strata::core::StepBreakdown bd{0.0};
+    double every_s = 10.0;
+    std::condition_variable cv;
+    bool quit = false;
+    std::thread ticker;
+    double now() const { return std::chrono::duration<double>(Clock::now() - t0).count(); }
+    void tick() {
+        std::unique_lock<std::mutex> lk(mu);
+        while (!cv.wait_for(lk, std::chrono::duration<double>(every_s), [&] { return quit; })) {
+            strata::core::StepBreakdown::Closed c;
+            if (!bd.close(now(), c)) continue;   // a read's chunk spans the window: the next tick
+            lk.unlock();   // the write without the ledger: a slow pipe must not hold the stage threads up
+            std::string out;
+            for (const std::string& l : strata::core::StepBreakdown::format(c)) out += "strata steps: " + l + "\n";
+            if (!out.empty()) {
+                std::fwrite(out.data(), 1, out.size(), stderr);   // one write: the lines stay together
+                std::fflush(stderr);
+            }
+            lk.lock();
+        }
+    }
+    void start() { ticker = std::thread([this] { tick(); }); }
+    ~StepLedger() {
+        { std::lock_guard<std::mutex> lk(mu); quit = true; }
+        cv.notify_all();
+        if (ticker.joinable()) ticker.join();
+    }
+};
+StepLedger* g_steps = nullptr;
+/// one ledger event, its time read under the lock (the calls' order is the time's)
+template <class F>
+inline void steps(F&& f) {
+    if (g_steps == nullptr) return;
+    std::lock_guard<std::mutex> lk(g_steps->mu);
+    f(g_steps->bd, g_steps->now());
+}
 /// STRATA_DSPLIT_ONEPOOL=1 (the two-request test): both stages' host threads share the one pool, one dispatch at a time.
 std::mutex* g_pool_lock = nullptr;
 /// --batch: the residency the windows decide their hits by and the VRAM behind it.  A window holds it shared while it
@@ -4371,6 +4414,9 @@ int main(int argc, char** argv) {
         // keep-alives); `pp_at` is where the running segment starts, `pp_total` 0 outside a prompt
         int64_t pp_from = 0, pp_at = 0, pp_total = 0;
         Clock::time_point pp_t0 = Clock::now();
+        // STRATA_STEP_BREAKDOWN: --prompt-split's second stage is a chunk behind the first, whose progress `processed`
+        // is: a chunk counts once the second stage has it too (its time and its tokens then land in one window)
+        int64_t steps_lag = 0;
         auto pp_line = [&](int64_t done) {
             if (pp_total <= 0) return;
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
@@ -4380,6 +4426,7 @@ int main(int argc, char** argv) {
         };
         prefill.should_stop = [&] {
             pp_line(pp_at + prefill.processed());
+            steps([&](auto& bd, double t) { bd.read_at(t, pp_at + prefill.processed() - steps_lag); });
             return stop_req.load();
         };
         // STRATA_TRACE=1: one stderr line per step of a request (the log shows where a request stops)
@@ -4682,6 +4729,17 @@ int main(int argc, char** argv) {
         };
         // a window's end: its commits, its tokens out, the next drafts (the first thread)
         auto slot_finish = [&](BatchSlot& b) -> bool {
+            // STRATA_STEP_BREAKDOWN: the window's emitted tokens, and the slot's end when this window ended it
+            struct StepsOut {
+                BatchSlot& b;
+                int64_t produced0;
+                ~StepsOut() {
+                    steps([&](auto& bd, double t) {
+                        bd.window_done(t, b.produced - produced0);
+                        if (!b.active.load()) bd.slot_active(t, b.id, false);
+                    });
+                }
+            } steps_out{b, b.produced};
             std::string e;
             int a = 0;
             while (a < b.T - 1 && b.window[(size_t) a + 1] == b.outv[(size_t) a]) ++a;
@@ -4764,6 +4822,7 @@ int main(int argc, char** argv) {
                                 if (b->active.load() && b->phase == 0 && (i < 0 || b->rounds < slots[(size_t) i]->rounds))
                                     i = b->id;
                             slots[(size_t) i]->phase = 1;
+                            steps([&](auto& bd, double t) { bd.slot_gen(t, i, true); });
                         }
                         ++s_busy;
                     }
@@ -4857,6 +4916,7 @@ int main(int argc, char** argv) {
             std::unique_lock<std::mutex> lk(smu);
             s_paused = true;
             scv.wait(lk, [&] { return s_busy == 0 && s_todo.empty() && s_fin.empty(); });
+            steps([&](auto& bd, double t) { bd.slots_stopped(t); });
         };
         auto resume_slots = [&] {
             std::lock_guard<std::mutex> lk(smu);
@@ -5111,7 +5171,23 @@ int main(int argc, char** argv) {
                          (long long) (f1 >> 20), (long long) (f2 >> 20));
             return true;
         };
+        std::unique_ptr<StepLedger> step_ledger;
+        if (const char* sb = std::getenv("STRATA_STEP_BREAKDOWN"); sb != nullptr && std::atof(sb) > 0) {
+            step_ledger = std::make_unique<StepLedger>();
+            step_ledger->every_s = std::atof(sb) >= 2 ? std::atof(sb) : 10.0;   // =1: every 10 s
+            g_steps = step_ledger.get();
+            step_ledger->start();
+            std::fprintf(stderr, "strata serve: step breakdown every %.0f s (STRATA_STEP_BREAKDOWN)\n",
+                         step_ledger->every_s);
+        }
+        struct StepsOff {   // the stage threads may still call steps() until they are joined: the ledger outlives them
+            ~StepsOff() { g_steps = nullptr; }
+        } steps_off;
         while ((resume_slots(), next_line(line))) {
+            struct StepsMain {   // the main thread holds a request (until this line is through)
+                StepsMain() { steps([](auto& bd, double t) { bd.main_busy(t, true); }); }
+                ~StepsMain() { steps([](auto& bd, double t) { bd.main_busy(t, false); }); }
+            } steps_main;
             if (line == "QUIT") break;
             if (line.rfind("BYIELD ", 0) == 0) continue;   // this engine reads a prompt through: the server takes it as such
             if (!s_err.empty()) {
@@ -5391,6 +5467,7 @@ int main(int argc, char** argv) {
             st.set_history(hist_n > 0 ? d_hist : nullptr, hist_n);
             req_tiers = tier_counters();
             const Clock::time_point r0 = Clock::now();
+            steps([](auto& bd, double t) { bd.reading(t, true, 0); });
             auto report = [&](const std::string& e) {   // a failed request: the engine exits after it
                 std::fprintf(stderr, "strata serve: %s\n", e.c_str());
                 std::printf("ERR %s\n", e.c_str());
@@ -5436,6 +5513,7 @@ int main(int argc, char** argv) {
                 if (admit < 0 && !give_back_slots(-1)) { report("giving a batch slot's VRAM back"); return 1; }
             }
             const int64_t reuse = pcache.begin(ids, req_imgs);
+            steps([&](auto& bd, double t) { bd.read_base(t, reuse); });
             tr("request", n, reuse);
             if (!ddump.dir.empty()) {
                 if (!ddump.open(err)) { report(err); return 1; }
@@ -5522,6 +5600,7 @@ int main(int argc, char** argv) {
                     if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
                 }
                 const bool split_on = pbuf.split_region != nullptr;
+                steps_lag = split_on ? chunk : 0;
                 if (split_on) {
                     if (!psplit.begin(pbuf.split_region, pbuf.split_bytes, chunk, reuse, batched_end, track, err)) {
                         report(err);
@@ -5550,6 +5629,7 @@ int main(int argc, char** argv) {
                         if (track && prefill.processed() > 0) pcache.set(a0, ids.data() + a0, prefill.processed());
                         break;
                     }
+                    steps([&](auto& bd, double t) { bd.read_at(t, b0 - steps_lag); });
                     if (track) {
                         pcache.set(a0, ids.data() + a0, b0 - a0);
                         ckpt(b0);
@@ -5561,6 +5641,8 @@ int main(int argc, char** argv) {
                     pcache.split_from = 0;
                     pcache.split_save = nullptr;
                     if (!psplit.finish(err)) { report(err); return 1; }
+                    steps_lag = 0;
+                    steps([&](auto& bd, double t) { bd.read_at(t, batched_end); });
                     tr("prompt split done");
                 }
                 // the tiers' moves (deterministic modes: refilled before the windows, as they were)
@@ -5605,6 +5687,7 @@ int main(int argc, char** argv) {
                         return false;
                     if (track) pcache.set(j, ids.data() + j, T);
                     j += T;
+                    steps([&](auto& bd, double t) { bd.read_at(t, j); });
                 }
                 return true;
             };
@@ -5651,6 +5734,7 @@ int main(int argc, char** argv) {
             }
             pp_total = 0;
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
+            steps([&](auto& bd, double t) { bd.reading(t, false, merge_from, n - reuse); });
             // the verify windows: the first holds the prompt's tokens from merge_from on (its last alone when the last
             // feed window was full, or none ran)
             int64_t p = merge_from;
@@ -5659,6 +5743,7 @@ int main(int argc, char** argv) {
             int64_t produced_n = 0;
             const char* finish = poison_at >= 0 ? "nonfinite" : "length";
             const Clock::time_point d0 = Clock::now();
+            steps([](auto& bd, double t) { bd.solo_decoding(t, true); });
             int64_t draft_offered = 0, draft_accepted = 0;
             // the expert-cache hits of the decode: rows either GPU computes from its VRAM cache, of all routed rows
             const int64_t hits0 = drive.d.cache_hits + drive.d.gpu2_entries, look0 = hits0 + drive.d.cache_refused;
@@ -5776,6 +5861,7 @@ int main(int argc, char** argv) {
                 ver.ple_ahead(0, outv[(size_t) a]);
                 first_window = false;
                 bool eos = false;
+                const int64_t produced0 = produced_n;
                 for (int i = fw ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     if (o.spec_lookup > 0) lookup.append(outv[(size_t) i]);
@@ -5783,6 +5869,7 @@ int main(int argc, char** argv) {
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
+                steps([&](auto& bd, double t) { bd.window_done(t, produced_n - produced0); });
                 ++rounds;
                 // the next window's drafts: the lookup's when they are more than the draft layer's chain allows (the
                 // chain stops at its first draft then)
@@ -5839,6 +5926,7 @@ int main(int argc, char** argv) {
                 poisoned = true;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            steps([](auto& bd, double t) { bd.solo_decoding(t, false); });
             const int64_t hits1 = drive.d.cache_hits + drive.d.gpu2_entries, look1 = hits1 + drive.d.cache_refused;
             const TierCounters t1 = tier_counters(), &t0 = req_tiers;
             std::printf("TIERS main_swaps=%lld main_fills=%lld main_dropped=%lld second_entries=%lld "
@@ -5945,6 +6033,7 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                     b.active.store(true);
+                    steps([&](auto& bd, double t) { bd.slot_active(t, admit, true); });
                 }
                 std::printf("BADM %d %d\n", admit, cont ? 1 : 0);
                 std::fflush(stdout);
