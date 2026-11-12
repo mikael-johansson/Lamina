@@ -109,7 +109,12 @@ while True:
             active[b][1] = 0
             stopped.add(b)
         continue
-    if line.startswith(("GEN ", "BGEN ")):
+    if line.startswith("BGENI "):             # as the engine: a slot never takes an image
+        print("ERR BGEN: images go through the solo path in this engine", flush=True)
+        if log:
+            log.write(f"REFUSED {line.split()[1]}\n"); log.flush()
+        continue
+    if line.startswith(("GEN ", "BGEN ", "GENI ")):
         f = line.split()
         slot = int(f[1]) if f[0] == "BGEN" else None
         max_new = int(f[2] if f[0] == "BGEN" else f[1])
@@ -544,6 +549,37 @@ class ParallelService(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(self.engine.slot_busy, [False, False])
         self.assertEqual(self.chat("fine again")["choices"][0]["message"]["content"], "ok, done.")
+
+    def test_image_waits_for_the_slots_and_later_requests_wait_for_it(self):
+        """An image goes through the solo path only (the engine's rope position table is the image's while it runs).
+        It waits for the busy slots to finish, no slot is given out meanwhile, and it runs before a text request that
+        came after it (live: an image request waited 46 s while later requests kept taking the slots that freed)."""
+        self.start(2)
+        out = {}
+        def go(k, text):
+            out[k] = self.chat(text, max_tokens=64)["choices"][0]["message"]["content"]
+        def image():
+            ids = list(b"an image turn")
+            out["img"] = list(self.engine.generate_batched(ids, 16, {}, threading.Event(), embeddings="fake.sve"))
+        ts = [threading.Thread(target=go, args=("a", "LONGREPLY one"))]
+        ts[0].start(); time.sleep(0.15)
+        ts.append(threading.Thread(target=go, args=("b", "LONGREPLY two"))); ts[1].start(); time.sleep(0.3)
+        ts.append(threading.Thread(target=image)); ts[2].start(); time.sleep(0.15)
+        ts.append(threading.Thread(target=go, args=("c", "later text"))); ts[3].start()
+        for t in ts:
+            t.join(30)
+        self.assertEqual(out.get("c"), "ok, done.", out)
+        self.assertTrue(out.get("img"), out)
+        reads = [l.split() for l in self.log.read_text().splitlines() if l.split()[0] in ("GEN", "BGEN", "GENI")]
+        kinds = [r[0] for r in reads]
+        self.assertEqual(kinds.count("GENI"), 1, reads)
+        geni = kinds.index("GENI")
+        self.assertEqual(reads[geni][3], "0", reads)            # no slot decoding beside the image
+        self.assertNotIn("REFUSED", self.log.read_text())       # it never asked for a slot
+        self.assertEqual(geni, len(reads) - 2, reads)           # c's read came after it
+        time.sleep(0.3)
+        self.assertEqual(self.engine.slot_busy, [False, False])
+        self.assertEqual(self.engine.solo_waiters, 0)
 
     def test_bgen_without_room_waits_and_goes_solo_not_a_503(self):
         """The engine has no K/V room for the conversation beside the others ("no room for a conversation"): it is

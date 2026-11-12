@@ -1211,6 +1211,10 @@ class StrataEngine:
             self.slot_cv = threading.Condition()
             self.waiting = 0                            # requests waiting for the control lines (ctl)
             self.admitting = 0                          # #1603: ... and those that gave the lines back to wait for a slot
+            # image requests waiting for the slots to empty (an image goes through the solo path only: the engine's one
+            # rope position table is the image's while it runs): no slot is given out meanwhile, so the slots drain and
+            # the image's turn comes, instead of later requests taking every slot that frees (live: a 46 s wait)
+            self.solo_waiters = 0
             self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
             # the requests waiting for a free slot, as [tier, arrival]: a slot that frees goes to the first of them
             # (the best tier, then the earliest), not to whichever thread its notify wakes first (21:53 live: a T0
@@ -1974,6 +1978,7 @@ class StrataEngine:
         stop_sent = False
         yields, solo_again, refused = 0, 0, 0
         wait_top, force_solo = False, False   # refused for its kind (an image, no K/V room): waited, from the top
+        draining = False    # an image request counted in solo_waiters (until its GENI is sent)
         admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
@@ -1991,8 +1996,37 @@ class StrataEngine:
                 # the engine pauses the slots for it (the GPUs to itself, vLLM's T1 exclusive window in effect, no slot
                 # reserved), a one-token decision too, and the prompt cache's rolling checkpoints are the solo path's
                 with self.slot_cv:
-                    alone = voice or (not any(self.slot_busy) and (self.waiting == 0 or force_solo))
+                    busy_now = sum(1 for b in self.slot_busy if b)
+                    if embeddings:      # never a slot: solo once the slots are empty, whoever else waits
+                        alone = busy_now == 0
+                    else:
+                        alone = voice or (busy_now == 0 and (self.waiting == 0 or force_solo) and self.solo_waiters == 0)
+                    if embeddings and not alone and not draining:
+                        draining = True
+                        self.solo_waiters += 1
                 force_solo = False
+                if embeddings and not alone:
+                    # the slots finish what they run (none is given out meanwhile: pick_slot), then this one goes
+                    # solo; the control lines are given back while waiting (a slot's read may need them)
+                    print(f"[strata] images: waiting for {busy_now} busy slot(s) to finish; no new admissions until "
+                          "this image turn has started", flush=True)
+                    if holding:
+                        self.ctl.release()
+                        holding = False
+                    with self.slot_cv:
+                        while not cancel.is_set() and any(self.slot_busy):
+                            deadline = getattr(cancel, "_strata_queue_deadline", None)
+                            if deadline is not None and time.monotonic() >= deadline:
+                                raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                            self.slot_cv.wait(timeout=0.5)
+                    if cancel.is_set():
+                        return
+                    continue        # the control lines again, from the top
+                if draining:        # its GENI goes out now: the slots are given out again
+                    draining = False
+                    with self.slot_cv:
+                        self.solo_waiters = max(0, self.solo_waiters - 1)
+                        self.slot_cv.notify_all()
                 if alone and (left > 1 or voice):
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
@@ -2009,8 +2043,8 @@ class StrataEngine:
                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
                     self._ctl_erred = False
                     def others():
-                        if voice:                       # a voice request is not moved to a slot for anyone
-                            return False
+                        if voice or embeddings:         # a voice request is not moved to a slot for anyone, and an
+                            return False                # image cannot be (it would wait for the slots and read again)
                         with self.slot_cv:
                             return self.waiting > 0
 
@@ -2405,6 +2439,10 @@ class StrataEngine:
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
+            if draining:            # an image request that never got its turn: the slots are given out again
+                with self.slot_cv:
+                    self.solo_waiters = max(0, self.solo_waiters - 1)
+                    self.slot_cv.notify_all()
             if PRIO_SCHED and tier <= 1 and out and self.VOICE_SPEECH_S > 0:
                 # the reply is spoken after it is generated: somebody talks until about then
                 self._voice_active_until(time.monotonic() + min(len(out) * self.VOICE_SPEECH_S, self.VOICE_SPEECH_MAX_S))
@@ -2572,7 +2610,7 @@ class StrataEngine:
         most `batch - PRIO_RESERVED_SLOTS` slots, so the reserved ones stay reachable only by T0/T1: a lower-tier
         request that would take one gets None (it parks and waits) while a voice request behind it still gets in."""
         free = [b for b in self.slot_order if not self.slot_busy[b]]
-        if not free:
+        if not free or self.__dict__.get("solo_waiters", 0) > 0:   # (an image's turn: the slots drain first)
             return None
         if PRIO_SCHED and tier is not None and tier >= 2 and \
                 self._lower_slots_held() >= max(0, self.batch - self._reserved_now()):
