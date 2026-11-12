@@ -5491,6 +5491,7 @@ int main(int argc, char** argv) {
                         from = b.get();
                 if (from != nullptr) {
                     const int64_t cells = (int64_t) from->held.size();
+                    const Clock::time_point slot_t0 = Clock::now();
                     bool ok = !kvg.on || kvg_ensure(cells + 256);
                     ok = ok && strata::core::session_copy_layers_mapped(from->ss1, from->map.data(), ss, nullptr, g, cells, 0,
                                                                          L, 0, main_cs) &&
@@ -5505,6 +5506,9 @@ int main(int argc, char** argv) {
                     if (!ok) { report("copying a batch slot's sessions back"); return 1; }
                     pcache.forget();
                     pcache.set(0, from->held.data(), cells);
+                    std::fprintf(stderr, "strata serve: prompt cache switch (batch slot %d): %lld cells in %.1f ms\n",
+                                 from->id, (long long) cells,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - slot_t0).count());
                     tr("from batch slot", from->id, cells);
                     from->held.clear();
                 }
